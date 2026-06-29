@@ -145,6 +145,15 @@ LANG_SMELLS = {
 
 SOURCE_EXTS = set().union(*LANG_EXTS.values())
 
+# Stems (split on _ - .) that signal logging/audit/telemetry code, for the
+# owner-map "Audit / logs" area. Token-level so "metric" does not match
+# "asymmetric" / "symmetric" the way a naive substring would.
+_AUDIT_TOKENS = frozenset({
+    "audit", "audits", "logger", "logging", "log", "logs",
+    "trace", "traces", "tracer", "tracing", "telemetry",
+    "metric", "metrics", "observ", "observer", "observability",
+})
+
 
 def iter_files(root: Path) -> Iterable[Path]:
     for current, dirs, files in os.walk(root):
@@ -224,6 +233,20 @@ def main() -> int:
         for p in files
         if p.suffix.lower() in {".md", ".rst", ".adoc"}
     ][:80]
+
+    # Targeted probes for owner-map areas that raw source samples cannot
+    # discriminate (logging/audit vs entry/UI). Conservative patterns to avoid
+    # noise: audit uses substrings, entry uses exact stems.
+    audit_samples = sorted(
+        rel(root, p)
+        for p in files
+        if any(tok in _AUDIT_TOKENS for tok in p.stem.lower().replace("-", "_").replace(".", "_").split("_"))
+    )[:20]
+    entry_samples = sorted(
+        rel(root, p)
+        for p in files
+        if p.stem.lower() in {"main", "app", "cli", "server", "index", "wsgi", "asgi", "manage", "handler", "route"}
+    )[:20]
 
     ci_files = []
     workflows = root / ".github" / "workflows"
@@ -306,6 +329,8 @@ def main() -> int:
         "ci_files": ci_files,
         "test_files_sample": test_files,
         "docs_sample": docs,
+        "audit_samples": audit_samples,
+        "entry_samples": entry_samples,
         "cleanliness_signals": {
             "neutral": neutral_counts,
             "language_smells": lang_smell_counts,

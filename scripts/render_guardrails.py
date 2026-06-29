@@ -76,32 +76,38 @@ def sec_owners(scan: dict) -> str:
     test_samples = scan.get("test_files_sample", [])[:10]
     docs = scan.get("docs_sample", [])[:10]
     ci = scan.get("ci_files", [])[:10]
+    audit = scan.get("audit_samples", [])[:10]
+    entry = scan.get("entry_samples", [])[:10]
     api_contracts = evidence.get("openapi", [])
     platform = evidence.get("docker", []) + evidence.get("kubernetes", [])
     release = evidence.get("release", [])
     security = evidence.get("security", [])
+    # Each area maps to its OWN discriminative evidence. Where the static scan
+    # has no signal, say so honestly instead of repeating the same source files
+    # across rows (that would look evidence-backed but isn't).
     rows = [
-        ("Domain identity / model", source_samples, "TODO"),
-        ("Configuration", docs + ci + platform, "TODO"),
-        ("Policy / rules", security + docs + source_samples, "TODO"),
-        ("Audit / logs", source_samples + docs, "TODO"),
-        ("API / wire contract", api_contracts + source_samples, "TODO"),
-        ("UI / product behavior", test_samples + source_samples, "TODO"),
-        ("Platform / runtime I/O", platform + source_samples, "TODO"),
-        ("Release artifacts", release + ci, "TODO"),
-        ("Test harness", test_samples + ci, "TODO"),
-        ("Security / privacy / secrets", security + source_samples, "TODO"),
+        ("Domain identity / model", source_samples, "locate the core domain/model types"),
+        ("Configuration", docs + ci + platform, "locate config files / env / IaC"),
+        ("Policy / rules", security + docs, "locate the policy/rules engine + CODEOWNERS"),
+        ("Audit / logs", audit, "locate logging / audit / telemetry code"),
+        ("API / wire contract", api_contracts + source_samples, "locate openapi/proto/schema + handlers"),
+        ("UI / product behavior", entry + test_samples, "locate UI entry points / views / e2e tests"),
+        ("Platform / runtime I/O", platform, "locate docker / k8s / IaC + runtime adapters"),
+        ("Release artifacts", release + ci, "locate the release / publish workflow"),
+        ("Test harness", test_samples + ci, "locate test runners + CI"),
+        ("Security / privacy / secrets", security + audit, "locate secret handling + security scans"),
     ]
     lines = [
         "# Owner Map (to build)",
         "",
-        "Identify one semantic **owner** (team/domain preferred) for each area. Routes, controllers, UI, and daemon scripts are usually *adapters*, not owners — record them as such.",
+        "Identify one semantic **owner** (team/domain preferred) for each area. Routes, controllers, UI, and daemon scripts are usually *adapters*, not owners — record them as such. The evidence below is a starting set from the static scan, not validated ownership.",
         "",
         "| Semantic area | Current evidence | Owner decision |",
         "|---|---|---|",
     ]
-    for area, hits, decision in rows:
-        lines.append(f"| {area} | {fmt_paths(hits)} | {decision} |")
+    for area, hits, hint in rows:
+        cell = fmt_paths(hits) if hits else f"no static signal — {hint}"
+        lines.append(f"| {area} | {cell} | TODO |")
     return "\n".join(lines)
 
 

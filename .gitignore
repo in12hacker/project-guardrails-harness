@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Generated scan/render outputs (default paths used by the scripts)
+/project-guardrails-scan.json
+project-guardrails-scan.json
+
+# OS / editors
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

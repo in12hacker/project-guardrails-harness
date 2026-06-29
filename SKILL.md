@@ -27,20 +27,21 @@ Use **Evidence over Claims**. Documentation, issue comments, and team assertions
      Claude Code sets `${CLAUDE_SKILL_DIR}` to this skill's directory at runtime. If a client does not export it, the first fallback resolves the personal-scope path and the second the project-scope path, so the command is portable across the supported install locations instead of pinned to one path. The output filename embeds the repo name and shell PID, so back-to-back runs on different repos (or concurrent sessions) don't overwrite each other's scan — pass the resulting path to the renderer. If the scanner still cannot be found, collect the evidence manually (next bullet).
    - If the script is unavailable, manually collect the same evidence: languages, package managers, CI files, tests, docs, release files, security files, deployment files, public contracts.
 
-3. **Classify the project**
-   - Read `references/10-project-profiles.md` when the project type is unclear or mixed.
-   - Classify by product/user/runtime/release model, not by language alone.
+3. **Classify the project — your judgment, not a scanner label**
+   - The scanner deliberately does not classify (that is a judgment call, not a deterministic one). Read its `readme_excerpt` + `manifest_deps` and the project's own AGENTS.md / README, then state the profile in your own words: product / users / runtime / release model / trust boundaries.
+   - Read `references/10-project-profiles.md` when the type is unclear or mixed; classify by product/runtime/release model, never by language alone.
 
 4. **Build the owner map**
    - Identify owners for domain identity, config, policy/rules, audit/logs, API/wire contract, UI/product behavior, platform/runtime I/O, release artifacts, and test harness.
    - Do not invent owners from desired architecture. Use code paths first; record uncertainty as a pre-decision item.
 
-5. **Generate rules**
-   - Use `references/20-rule-catalog.md`.
-   - Every hard rule must have: trigger, owner, required evidence, reject condition, and verification command or harness.
+5. **Generate rules as a gap-check (ingest first, don't overwrite)**
+   - If the scan's `instruction_files` is non-empty, read those AGENTS.md / `.claude`|`cursor`|`codex` rules / CONTRIBUTING first and treat them as the **single source of truth**. Your job is to **link to them and fill gaps — never duplicate** a fact that already lives there.
+   - Then gap-check each family in `references/20-rule-catalog.md`: already enforced (by what command / file)? gap? if genuinely new, state trigger · owner · required evidence · reject condition · verification.
+   - A hard rule without a runnable check is a wish, not a rule. Prefer promoting a rule from `memory.md` once it is observed in real work over inventing it up front.
 
-6. **Generate harness**
-   - Use `references/30-harness-catalog.md`.
+6. **Generate harness against the project's real commands**
+   - Use `references/30-harness-catalog.md`, but map each gate to the **actual command** the project already uses (from the scan's `build_targets`, e.g. `make gate`, `coverage-gate`, `verify-release`) — not a generic "infer from ecosystem" guess. If a gate has no real command yet, that is a gap to create, not a command to fabricate.
    - Separate PR gate, closeout gate, product acceptance gate, and release gate.
    - Mock/contract tests cannot prove product acceptance unless the product itself is a library or contract-only component.
 
@@ -71,13 +72,13 @@ python3 "$SCAN_R" "<your-scan.json>" --out-dir .guardrails/
 ```text
 .guardrails/
 ├── INDEX.md          # ALWAYS loaded: one-line profile, owner summary, hard-gate shortlist, links (keep <150 lines)
-├── profile.md        # project profile + evidence inventory
+├── profile.md        # evidence: README excerpt + deps + build targets + existing rules
 ├── owners.md         # owner map (semantic owners vs adapters)
 ├── rules/
-│   ├── hard.md       # hard gates: trigger / owner / evidence / reject / verify
-│   └── advisory.md   # advisory rules + ratchet plan
+│   ├── hard.md       # hard-rule gap-check vs existing rules + catalog
+│   └── advisory.md   # advisory + ratchet gap-check
 ├── cleanliness.md    # debt / smell / large-file inventory and ratchet candidates
-├── harness.md        # tiered gate matrix (PR / closeout / product / release) + commands
+├── harness.md        # gate matrix mapped to the project's real build targets
 ├── supply-chain.md   # release / supply-chain gates (load when touching releases)
 ├── memory.md         # durable learned facts from coding work (owners, risks, commands, acceptance surfaces)
 └── decisions.md      # unresolved decisions + migration/ratchet plan + sources
@@ -103,5 +104,8 @@ Keep `INDEX.md` under ~150 lines and each file under ~300 lines; put the most sa
 - Do not treat fail-open/fail-closed as a global default; require a layer matrix.
 - Do not let plaintext secrets persist outside the approved runtime boundary.
 - Do not declare release-grade supply-chain assurance without provenance and signed/verifiable artifacts.
+- Do not classify the project by keyword or language alone — read its self-description (README / AGENTS.md) and dependencies, then state the profile.
+- Do not duplicate a rule the project already states in its own files — link to it and gap-fill.
 - Do not add project-specific rules until the project profile and owner map are explicit.
 - Do not write durable project memory without code paths, task evidence, and a maturity/status label.
+- Do not fabricate a verification command; if no real command exists, mark it a gap.

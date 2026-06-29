@@ -41,24 +41,46 @@ def fmt_paths(paths: list[str], limit: int = 5) -> str:
 def sec_profile(scan: dict) -> str:
     evidence = scan.get("evidence", {})
     languages = scan.get("languages", {})
-    hints = scan.get("profile_hints", [])
     ci = scan.get("ci_files", [])
-    profiles = scan.get("likely_profiles", [])
+    deps = scan.get("manifest_deps", {})
+    targets = scan.get("build_targets", [])
+    readme = scan.get("readme_excerpt", "")
+    instr = scan.get("instruction_files", [])
     lines = [
         "# Profile & Evidence Inventory",
         "",
+        "_The scanner deliberately does not classify the project — that is a judgment call for you. Read the README excerpt + dependencies, then state the profile in your own words before writing rules._",
+        "",
         f"- Root: `{scan.get('root')}`",
         f"- Languages: {', '.join(languages) or 'unknown'}",
-        f"- Likely profile: {', '.join(f'`{p}`' for p in profiles) or '`unknown` — classify manually before writing hard rules'}",
-        f"- Profile hints: {', '.join(f'`{p}`' for p in hints) or 'none'}",
         f"- CI present: {yes(ci)}" + (f" (`{', '.join(ci[:5])}`)" if ci else ""),
         f"- Tests sampled: {len(scan.get('test_files_sample', []))}",
         f"- Docs sampled: {len(scan.get('docs_sample', []))}",
         f"- Release/build artifacts present: {yes(evidence.get('release'))}",
     ]
+    if readme:
+        lines += ["", "## README (self-description — classify from this)", "", "```", readme, "```"]
+    if deps:
+        lines += ["", "## Dependencies (domain signal)", ""]
+        for k, v in deps.items():
+            lines.append(f"- **{k}**: {', '.join(f'`{d}`' for d in v)}")
+    if targets:
+        lines += ["", "## Build / task targets (real commands)", "", f"`{'`, `'.join(targets)}`"]
+    if instr:
+        lines += [
+            "",
+            "## Existing project rules — AUTHORITATIVE (ingest, do not overwrite)",
+            "",
+            "The project already keeps rule/instruction files. Treat them as the **single source of truth**: read them first, and let this guardrails set only **fill gaps and link to them — never duplicate** a fact that already lives there.",
+            "",
+            "| File | Lines |",
+            "|---|---|",
+        ]
+        for f in instr:
+            lines.append(f"| `{f['path']}` | {f['lines']} |")
     rows = [(k, v) for k, v in evidence.items() if v]
     if rows:
-        lines += ["", "## Evidence groups found", "", "| Group | Sample |", "|---|---|"]
+        lines += ["", "## Other evidence groups", "", "| Group | Sample |", "|---|---|"]
         for k, v in rows:
             sample = ", ".join(f"`{p}`" for p in v[:5]) if v else "—"
             lines.append(f"| {k} | {sample} |")
@@ -111,107 +133,46 @@ def sec_owners(scan: dict) -> str:
     return "\n".join(lines)
 
 
-_HARD_RULES = [
-    (
-        "Evidence integrity",
-        "Any completion, mergeability, release-readiness, or closeout claim",
-        "Claim owner",
-        "code paths + commit + local verification + remote CI or manual-runner evidence",
-        "only documentation/status/assertion is cited, or skipped/manual checks are counted as pass",
-        "EvidenceGate in harness.md",
-    ),
-    (
-        "Product/profile fit",
-        "Adding or changing product acceptance criteria",
-        "Product owner",
-        "explicit project profile + real acceptance surface",
-        "a rule imports another paradigm's acceptance test",
-        "Product acceptance row in harness.md",
-    ),
-    (
-        "Architecture / owner",
-        "Changing public contracts, domain concepts, or ownership boundaries",
-        "Semantic owner",
-        "owner map + checked consumers + code paths",
-        "routes/controllers/UI/daemon scripts become silent owners",
-        "static architecture check + owner review",
-    ),
-    (
-        "Domain / parameter flow",
-        "Passing cross-layer semantic values",
-        "Domain owner",
-        "ParameterFlow record + semantic regression tests",
-        "type/name fidelity is lost outside a wire/storage boundary",
-        "ParameterFlow regression harness",
-    ),
-    (
-        "Test truthfulness",
-        "Claiming behavior is accepted or complete",
-        "Test harness owner",
-        "test level + basis + real stimulus where required",
-        "mock/contract tests are counted as product acceptance for non-contract products",
-        "tiered TestGate in harness.md",
-    ),
-    (
-        "Policy source of truth",
-        "Changing rules, defaults, exclusions, or overrides",
-        "Policy owner",
-        "authoritative policy source + forbidden parallel interpreters",
-        "adapter code reinterprets policy or hardcodes semantic defaults",
-        "policy source-of-truth harness",
-    ),
-    (
-        "Failure semantics",
-        "Adding fallback, degraded mode, or resource-limit behavior",
-        "Runtime owner",
-        "per-layer fail-open/fail-closed matrix + visible status evidence",
-        "a global default is used for unrelated layers",
-        "FailureSemanticsGate",
-    ),
-    (
-        "Security / privacy / secrets",
-        "Handling plaintext secrets or sensitive data",
-        "Security owner",
-        "runtime boundary + negative persistence checks",
-        "plaintext secrets persist in logs/files/fixtures/browser storage",
-        "SecretLifecycleHarness",
-    ),
-]
-
-
 def sec_rules_hard() -> str:
-    lines = [
-        "# Hard Rules (draft)",
+    return "\n".join([
+        "# Hard Rules — gap-check, not a fabricated list",
         "",
-        "Each hard rule needs: **trigger · owner · required evidence · reject condition · verification command/harness**. Put the most safety-critical REJECT conditions near the *top* of this file, not the middle — long files are recalled worst in the middle.",
+        "Do **not** invent concrete rules here. For each standard category, answer three questions against the **project's existing rules** (read any AGENTS.md / `.claude`|`cursor`|`codex` rules / CONTRIBUTING first) and the catalog in the skill's `references/20-rule-catalog.md`:",
         "",
-        "| Category | Trigger | Owner | Required evidence | Reject if | Verify |",
-        "|---|---|---|---|---|---|",
-    ]
-    lines += [f"| {c} | {t} | {o} | {e} | {r} | {v} |" for c, t, o, e, r, v in _HARD_RULES]
-    lines += ["", "Supply-chain hard rules live in [supply-chain.md](../supply-chain.md) — load it when touching releases."]
-    return "\n".join(lines)
-
-
-_ADVISORY_RULES = [
-    ("Code cleanliness / state ownership", "Utility/helper/compat paths, shared state, and constructors need an owner, scope, and a delete/review date."),
-    ("Runtime / protocol integrity", "Kernel/device/proxy/browser/stream constraints need profile-specific harnesses (often manual signoff)."),
-    ("Operations / version / coverage", "Runtime degraded states, version sync, log retention, and coverage exclusions need evidence and owners."),
-    ("Rule lifecycle", "Every rule needs status, owner, harness, review/delete date, and a supersession path."),
-]
+        "1. **Already enforced?** by what command/check, in which file?",
+        "2. **Gap?** what is missing, advisory-only, or unowned?",
+        "3. **If genuinely new:** state trigger · owner · required evidence · reject condition · verification — and only promote it from `memory.md` once it is grounded in a real code path + runnable check.",
+        "",
+        "An empty row is honest, not a hole. A rule written without a runnable check is a wish.",
+        "",
+        "| Category | Already enforced? (file / command) | Gap to close |",
+        "|---|---|---|",
+        "| Evidence integrity (completion / mergeability / release claims) | _check existing_ | _?_ |",
+        "| Product/profile fit (acceptance uses the real stimulus) | _check existing_ | _?_ |",
+        "| Architecture & owner boundaries (no silent adapter-owners) | _check existing_ | _?_ |",
+        "| Domain & parameter flow (no lossy type/name round-trips) | _check existing_ | _?_ |",
+        "| Test truthfulness (mock/contract ≠ product acceptance) | _check existing_ | _?_ |",
+        "| Policy source of truth (one owner, no parallel interpreters) | _check existing_ | _?_ |",
+        "| Failure semantics (per-layer fail-open/closed, visible status) | _check existing_ | _?_ |",
+        "| Security / privacy / secrets (no plaintext outside the runtime) | _check existing_ | _?_ |",
+        "",
+        "Supply-chain hard rules live in [supply-chain.md](../supply-chain.md) — load it when touching releases.",
+    ])
 
 
 def sec_rules_advisory() -> str:
-    lines = [
-        "# Advisory Rules & Ratchet Plan (draft)",
+    return "\n".join([
+        "# Advisory Rules & Ratchet Plan — gap-check",
         "",
-        "Advisory until a reliable automated check or explicit manual signoff exists. Ratchet toward hard over time — each one needs an **owner + target date + deletion criterion**, and must not *increase* measured debt beyond the current baseline.",
+        "Same gap-check as hard rules, but these start **advisory** (inventory / warn only) and ratchet toward hard as automation matures. Each needs an owner + target date + deletion criterion, and must not *increase* measured debt beyond the current baseline.",
         "",
-        "| Category | Candidate advisory rule |",
-        "|---|---|",
-    ]
-    lines += [f"| {c} | {r} |" for c, r in _ADVISORY_RULES]
-    return "\n".join(lines)
+        "| Category | Already covered? | Ratchet plan |",
+        "|---|---|---|",
+        "| Code cleanliness / state ownership | _?_ | _?_ |",
+        "| Runtime / protocol integrity (kernel/device/proxy/stream) | _?_ | _?_ |",
+        "| Operations / version / coverage truth | _?_ | _?_ |",
+        "| Rule lifecycle (status, owner, harness, review date) | _?_ | _?_ |",
+    ])
 
 
 def sec_cleanliness(scan: dict) -> str:
@@ -251,32 +212,30 @@ def sec_cleanliness(scan: dict) -> str:
     return "\n".join(lines)
 
 
-def sec_harness() -> str:
-    rows = [
-        ("Format", "infer from ecosystem"),
-        ("Lint / static", "infer from ecosystem"),
-        ("Unit", "infer from ecosystem"),
-        ("Contract", "OpenAPI/protobuf/SDK check if present"),
-        ("Security dependency", "cargo audit / npm audit / pip-audit / govulncheck / equivalent"),
-        ("Architecture drift", "repo-specific rg/static scripts"),
-        ("Code cleanliness", "large-file/helper/compat/ParameterFlow ratchet"),
-        ("Policy source of truth", "hardcoded-default / parallel-interpreter scan + owner tests"),
-        ("Failure semantics", "per-layer degraded / fallback / full-limit tests"),
-        ("Secret lifecycle", "static leak scan + runtime no-plaintext-persistence tests"),
-        ("Runtime / protocol", "profile-specific ABI / device / proxy / encoding / flush tests"),
-        ("Version / coverage", "single version source + coverage exclusion inventory"),
-        ("Product acceptance", "real product stimulus, not mock"),
-        ("Release", "clean build + SBOM + provenance/signature (see supply-chain.md)"),
-    ]
+def sec_harness(scan: dict) -> str:
+    targets = scan.get("build_targets", [])
     lines = [
-        "# Harness Matrix (draft)",
+        "# Harness Matrix — map gates to the project's real commands",
         "",
-        "Gates are tiered — do not collapse them. **PR** (fast, new-regression prevention) → **Closeout** (milestone signoff) → **Product acceptance** (real stimulus) → **Release** (artifact integrity). For ecosystem-specific commands, see the skill's `references/30-harness-catalog.md`.",
+        "Gates are tiered — do not collapse them: **PR** (fast) → **Closeout** (milestone) → **Product acceptance** (real stimulus) → **Release** (artifact integrity). For each gate, name the **actual command** the project already uses (see detected targets below) — not a generic guess. Ecosystem reference: the skill's `references/30-harness-catalog.md`.",
         "",
-        "| Gate | Status | Candidate command |",
+        "| Gate | Status | Real command (from the project) |",
         "|---|---|---|",
     ]
-    lines += [f"| {g} | TODO | {c} |" for g, c in rows]
+    for g in ("Format", "Lint / static", "Unit", "Contract", "Security dependency",
+              "Architecture drift", "Code cleanliness", "Policy source of truth",
+              "Failure semantics", "Secret lifecycle", "Runtime / protocol",
+              "Version / coverage", "Product acceptance", "Release"):
+        lines.append(f"| {g} | TODO | _map from targets_ |")
+    if targets:
+        lines += [
+            "",
+            "## Detected build / task targets",
+            "",
+            f"`{'`, `'.join(targets)}`",
+            "",
+            "_Prefer these over `infer from ecosystem`. If a gate has no target yet, that is a gap to create — record it, do not fake a command._",
+        ]
     return "\n".join(lines)
 
 
@@ -392,7 +351,7 @@ def build_single(scan: dict) -> str:
         "",
         sec_rules_advisory(),
         "## Cleanliness Signals\n\n" + sec_cleanliness(scan),
-        sec_harness(),
+        sec_harness(scan),
         sec_supply_chain(),
         sec_memory(scan),
         sec_decisions(scan),
@@ -404,38 +363,42 @@ def build_index(scan: dict) -> str:
     evidence = scan.get("evidence", {})
     languages = scan.get("languages", {})
     ci = scan.get("ci_files", [])
-    profiles = scan.get("likely_profiles", [])
-    hints = scan.get("profile_hints", [])
+    instr = scan.get("instruction_files", [])
     root = scan.get("root", "")
     basename = Path(root).name or "project"
-    lines = [
-        f"# Project Guardrails — {basename}",
-        "",
-        "> **Read this INDEX first; load the other files just-in-time** by what the current task touches:",
+    lines = [f"# Project Guardrails — {basename}", ""]
+    if instr:
+        lines += [
+            f"> ⚠ **{len(instr)} existing rule/instruction files detected** (AGENTS.md / `.claude`|`cursor`|`codex` rules / CONTRIBUTING …).",
+            "> They are the **authoritative source of truth**. This `.guardrails/` set exists to **link to them and fill gaps — not to replace or duplicate**. See *Existing project rules* in [profile.md](profile.md).",
+            "",
+        ]
+    lines += [
+        "> **Read this INDEX first; load other files just-in-time** by what the task touches:",
         "> - reviewing a PR → [`rules/hard.md`](rules/hard.md) + [`harness.md`](harness.md)",
         "> - cutting a release → [`supply-chain.md`](supply-chain.md) + the release row of [`harness.md`](harness.md)",
         "> - an ownership question → [`owners.md`](owners.md)",
         "> - a refactor / cleanup → [`cleanliness.md`](cleanliness.md) + [`rules/advisory.md`](rules/advisory.md)",
         "> - learning from a coding task → [`memory.md`](memory.md) + [`decisions.md`](decisions.md)",
-        "> A single monolithic guardrails file buries critical rules mid-document and re-costs tokens on every read; this split avoids that.",
+        "> A single monolithic file buries critical rules mid-document and re-costs tokens on every read; this split avoids that.",
         "",
-        "## Profile (one-liner)",
-        f"- Languages: {', '.join(languages) or 'unknown'} · Profile: {', '.join(f'`{p}`' for p in profiles) or '`unknown`'} · Hints: {', '.join(f'`{p}`' for p in hints) or 'none'}",
-        f"- CI: {yes(ci)} · Tests sampled: {len(scan.get('test_files_sample', []))} · Release artifacts: {yes(evidence.get('release'))}",
+        "## At a glance",
+        f"- Languages: {', '.join(languages) or 'unknown'} · CI: {yes(ci)} · Tests sampled: {len(scan.get('test_files_sample', []))} · Release artifacts: {yes(evidence.get('release'))}",
+        f"- **Profile: classify yourself** from [profile.md](profile.md) (README excerpt + dependencies) — the scanner does not guess.",
         "",
-        "## Hard-gate shortlist (non-negotiables)",
-        "- **Evidence integrity** — completion claims need code path + commit + local + remote-CI/manual evidence.",
-        "- **Owner boundary** — public contracts & domain concepts have one owner + checked consumers.",
+        "## Non-negotiables (always hold)",
+        "- **Evidence over claims** — no completion / mergeable / release-ready claim without code path + commit + CI/manual evidence.",
+        "- **Ingest, don't overwrite** — if the project already states a rule, link it; never duplicate a fact that lives elsewhere.",
         "- **Test truthfulness** — mock/contract tests ≠ product acceptance (unless contract-only product).",
         "- **Supply-chain honesty** — release-grade needs SBOM + signed provenance (SLSA L2/L3) + verify-at-deploy.",
         "",
         "## Files",
-        "- [`profile.md`](profile.md) — full profile + evidence inventory",
+        "- [`profile.md`](profile.md) — evidence inventory + README/deps/targets + existing rules list",
         "- [`owners.md`](owners.md) — owner map (owners vs adapters)",
-        "- [`rules/hard.md`](rules/hard.md) — hard gates (trigger/owner/evidence/reject/verify)",
-        "- [`rules/advisory.md`](rules/advisory.md) — advisory rules + ratchet plan",
+        "- [`rules/hard.md`](rules/hard.md) — hard-rule gap-check",
+        "- [`rules/advisory.md`](rules/advisory.md) — advisory + ratchet gap-check",
         "- [`cleanliness.md`](cleanliness.md) — debt / smell / large-file inventory (language-aware)",
-        "- [`harness.md`](harness.md) — tiered gate matrix + commands",
+        "- [`harness.md`](harness.md) — gate matrix → real commands",
         "- [`supply-chain.md`](supply-chain.md) — release / supply-chain gates",
         "- [`memory.md`](memory.md) — durable learned facts from coding work",
         "- [`decisions.md`](decisions.md) — unresolved decisions + migration plan + sources",
@@ -452,7 +415,7 @@ def build_multi(scan: dict) -> "dict[str, str]":
         "rules/hard.md": sec_rules_hard(),
         "rules/advisory.md": sec_rules_advisory(),
         "cleanliness.md": "# Cleanliness Signals\n\n" + sec_cleanliness(scan),
-        "harness.md": sec_harness(),
+        "harness.md": sec_harness(scan),
         "supply-chain.md": sec_supply_chain(),
         "memory.md": sec_memory(scan),
         "decisions.md": sec_decisions(scan),

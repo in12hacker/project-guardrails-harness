@@ -19,6 +19,11 @@ import os
 from pathlib import Path
 from typing import Iterable
 
+try:  # Python 3.11+; optional -- manifest dep parsing degrades gracefully if absent
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
+
 
 IGNORE_DIRS = {
     ".git",
@@ -153,6 +158,151 @@ _AUDIT_TOKENS = frozenset({
     "trace", "traces", "tracer", "tracing", "telemetry",
     "metric", "metrics", "observ", "observer", "observability",
 })
+
+
+# --- Domain-neutral evidence collectors -------------------------------------
+# The scanner does NOT classify the project (no keyword profiles). It surfaces
+# raw evidence -- the project's own self-description, its dependencies, its
+# build commands, and any rules it already keeps -- so the MODEL classifies and
+# gap-fills. ("Data-backed, not guessed"; classification is the model's job.)
+
+INSTRUCTION_FILE_NAMES = (
+    "AGENTS.md", "CLAUDE.md", "GEMINI.md", "COPILOT.md", "CODEX.md",
+    "CONTRIBUTING.md", "llms.txt", ".cursorrules",
+)
+INSTRUCTION_FILE_DIRS = (".cursor/rules", ".claude/rules", ".codex/rules", ".agents")
+
+
+def _line_count(path: Path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
+    except OSError:
+        return 0
+
+
+def collect_instruction_files(root: Path) -> list[dict]:
+    """Rule/instruction docs the project ALREADY keeps. Presence + size only;
+    content is the model's to read as authoritative (ingest, don't overwrite)."""
+    found: list[dict] = []
+    seen: set[str] = set()
+    for name in INSTRUCTION_FILE_NAMES:
+        if (root / name).is_file():
+            found.append({"path": name, "lines": _line_count(root / name)})
+            seen.add(name)
+    for d in INSTRUCTION_FILE_DIRS:
+        rdir = root / d
+        if rdir.is_dir():
+            for p in sorted(rdir.rglob("*")):
+                if p.is_file() and p.suffix.lower() in {".md", ".mdc"}:
+                    relp = p.relative_to(root).as_posix()
+                    if relp not in seen:
+                        found.append({"path": relp, "lines": _line_count(p)})
+                        seen.add(relp)
+    return sorted(found, key=lambda x: x["path"])[:40]
+
+
+def readme_excerpt(root: Path) -> str:
+    """First non-empty lines of the README -- the project's own one-liner, so
+    the model classifies from self-description instead of keyword matching."""
+    for name in ("README.md", "README.rst", "README.txt", "README", "readme.md"):
+        p = root / name
+        if p.is_file():
+            try:
+                lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError:
+                return ""
+            return "\n".join(ln.rstrip() for ln in lines if ln.strip())[:1200]
+    return ""
+
+
+def _toml_dict_deps(path: Path, sections) -> list[str]:
+    if tomllib is None:
+        return []
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    deps: list[str] = []
+    for sec in sections:
+        block = data
+        for part in sec.split("."):
+            block = block.get(part, {}) if isinstance(block, dict) else {}
+        if isinstance(block, dict):
+            deps.extend(block.keys())
+    return sorted(set(deps))[:40]
+
+
+def manifest_deps(root: Path) -> dict[str, list[str]]:
+    """Top-level dependency names. Domain-neutral: the model reads
+    'aya-ebpf, rcgen, aes-gcm' and infers eBPF + crypto itself."""
+    deps: dict[str, list[str]] = {}
+    cargo = root / "Cargo.toml"
+    if cargo.is_file():
+        d = _toml_dict_deps(cargo, ("dependencies", "dev-dependencies", "workspace.dependencies"))
+        if d:
+            deps["cargo"] = d
+    pyproj = root / "pyproject.toml"
+    if pyproj.is_file() and tomllib is not None:
+        try:
+            data = tomllib.loads(pyproj.read_text(encoding="utf-8"))
+            reqs = data.get("project", {}).get("dependencies", [])
+            names = sorted(set(str(r).split()[0].split("[")[0] for r in reqs if str(r).strip()))[:40]
+            if names:
+                deps["python"] = names
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+    pkg = root / "package.json"
+    if pkg.is_file():
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+            names: list[str] = []
+            for k in ("dependencies", "devDependencies"):
+                block = data.get(k, {})
+                if isinstance(block, dict):
+                    names.extend(block.keys())
+            if names:
+                deps["npm"] = sorted(set(names))[:40]
+        except (OSError, json.JSONDecodeError):
+            pass
+    gomod = root / "go.mod"
+    if gomod.is_file():
+        try:
+            got = [
+                ln.strip().split(" v")[0]
+                for ln in gomod.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if ln.strip().startswith(("github.com/", "golang.org/", "gopkg.in/")) and " v" in ln
+            ]
+            got = sorted(set(x for x in got if x))[:40]
+            if got:
+                deps["go"] = got
+        except OSError:
+            pass
+    return deps
+
+
+def build_targets(root: Path) -> list[str]:
+    """Makefile/justfile target names, so the model maps gates to real commands
+    instead of the generic 'infer from ecosystem'."""
+    for name in ("Makefile", "makefile", "GNUmakefile", "justfile", "Justfile"):
+        p = root / name
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return []
+        targets: list[str] = []
+        for ln in text.splitlines():
+            if ln.startswith(("\t", " ", "#")):
+                continue
+            head = ln.split("#", 1)[0].strip()
+            if ":" not in head or "=" in head or head.startswith(("if", "for", "while", "!")):
+                continue
+            tgt = head.split(":", 1)[0].strip()
+            if tgt and not tgt.startswith((".", "$", "%")):
+                targets.append(tgt)
+        return sorted(set(targets))[:40]
+    return []
 
 
 def iter_files(root: Path) -> Iterable[Path]:
@@ -290,32 +440,14 @@ def main() -> int:
             for smell, tokens in LANG_SMELLS[lang].items():
                 lang_smell_counts[lang][smell] += sum(lower.count(tok.lower()) for tok in tokens)
 
-    profile_hints = []
-    likely_profiles = []
-    if evidence["rust"] or languages["rust"]:
-        profile_hints.append("rust")
-    if evidence["python"] or languages["python"]:
-        profile_hints.append("python")
-    if languages["shell"]:
-        profile_hints.append("shell")
-    if evidence["node"] or languages["typescript"] or languages["javascript"]:
-        profile_hints.append("web_or_node")
-    if languages["go"]:
-        profile_hints.append("go")
-    if languages["java"] or languages["kotlin"]:
-        profile_hints.append("jvm")
-    if languages["c_cpp"]:
-        profile_hints.append("native")
-    if evidence["docker"] or evidence["kubernetes"]:
-        likely_profiles.append("infra_or_service")
-    if evidence["openapi"]:
-        likely_profiles.append("api_service")
-    if evidence["release"]:
-        profile_hints.append("release_artifact_producer")
-    if evidence["guardrails"]:
-        profile_hints.append("existing_guardrails")
-    if any("e2e" in p.lower() or "playwright" in p.lower() for p in test_files):
-        likely_profiles.append("product_or_web_e2e")
+    # The scanner deliberately does NOT classify the project (no keyword
+    # profiles -- that is the model's judgment call). It surfaces domain-neutral
+    # evidence: the project's self-description, its dependencies, its build
+    # commands, and any rules it already keeps.
+    instruction_files = collect_instruction_files(root)
+    readme = readme_excerpt(root)
+    deps = manifest_deps(root)
+    targets = build_targets(root)
 
     result = {
         "root": str(root),
@@ -337,9 +469,13 @@ def main() -> int:
             "large_files": sorted(large_files, key=lambda item: int(item["lines"]), reverse=True)[:30],
             "utility_files": sorted(utility_files)[:50],
         },
-        "likely_profiles": sorted(set(likely_profiles)),
-        "profile_hints": sorted(set(profile_hints)),
+        "instruction_files": instruction_files,
+        "readme_excerpt": readme,
+        "manifest_deps": deps,
+        "build_targets": targets,
         "guardrail_questions": [
+            "What is the project's real profile? Read readme_excerpt + manifest_deps + the project's own AGENTS.md and state it -- do not trust a scanner label.",
+            "Which existing instruction files (AGENTS.md / .claude|cursor|codex/rules / CONTRIBUTING) already state rules? Read them as authoritative and gap-fill, never duplicate.",
             "Which code paths are semantic owners, and which are only adapters?",
             "Which tests are PR gates vs product acceptance gates?",
             "Which release artifacts exist, and are they signed/verifiable (SLSA provenance)?",

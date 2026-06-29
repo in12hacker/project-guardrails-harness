@@ -45,7 +45,9 @@ HarnessMatrix:
 | Python | `ruff`, `mypy/pyright`, `pytest` | `pip-audit`, `bandit`, lockfile/uv/poetry checks |
 | Go | `gofmt`, `go vet`, `go test ./...` | `govulncheck`, `gosec`, module checksum |
 | Java/Kotlin | Gradle/Maven test/check | OWASP Dependency-Check, SpotBugs, Snyk/OSV |
-| Containers/IaC | image build, policy tests | Trivy/Grype, Checkov/tfsec, signature/provenance |
+| Containers/IaC | image build, policy tests | Trivy/Grype, Checkov/tfsec, cosign-signed images |
+
+Release-grade supply-chain tooling (2026): produce **Sigstore-signed build provenance** (`gh attestation build`, npm `--provenance`, `cosign sign`), publish via **Trusted Publishing / OIDC** (no long-lived registry tokens), and **verify at deploy** (`gh attestation verify`, `slsa-verifier`, OPA Gatekeeper for admitted images). Gate incoming dependencies with **OpenSSF Scorecard** / GitHub dependency-review. Provenance that is produced but not verified at consumption is not assurance.
 
 ## Static Architecture Checks
 
@@ -54,7 +56,8 @@ HarnessMatrix:
 - missing owner for config/rule/audit/domain identity;
 - raw JSON/primitive domain round-trip;
 - ABI/wire changes without compatibility tests;
-- stale path or command in rules.
+- stale path or command in rules;
+- **ADR / decision drift** — an accepted architecture decision with no runnable check enforcing it (promote it to a fitness function that fails the PR when violated).
 
 ## Policy Source-of-Truth Checks
 

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Scan a repository for guardrail-generation evidence.
 
-This script intentionally uses only the Python standard library so it can run in
-most projects without dependency installation.
+Stdlib-only so it runs in most projects without installing dependencies.
+
+Smell detection is split into:
+  * language-neutral signals — counted across all source files (debt markers,
+    wrapper/mock/policy/secret/protocol keywords); and
+  * per-language probes — counted only for languages actually present, so a
+    Python or TypeScript project no longer gets misleading counts invented
+    from Rust-specific idioms (unwrap/panic/once_cell/...).
 """
 
 from __future__ import annotations
@@ -44,7 +50,6 @@ LANG_EXTS = {
     "kotlin": {".kt", ".kts"},
     "c_cpp": {".c", ".cc", ".cpp", ".h", ".hpp"},
     "shell": {".sh", ".bash", ".zsh"},
-    "yaml": {".yml", ".yaml"},
 }
 
 MARKERS = {
@@ -57,7 +62,7 @@ MARKERS = {
     "kubernetes": ["Chart.yaml", "kustomization.yaml"],
     "github_actions": [".github/workflows"],
     "openapi": ["openapi.yaml", "openapi.yml", "swagger.yaml", "api"],
-    "security": ["SECURITY.md", "deny.toml", ".github/dependabot.yml"],
+    "security": ["SECURITY.md", "deny.toml", ".github/dependabot.yml", "CODEOWNERS"],
     "release": ["Makefile", "justfile", ".goreleaser.yml", "release.yml"],
 }
 
@@ -72,37 +77,67 @@ TEST_HINTS = (
     "pytest",
 )
 
-TEXT_EXTS = {
-    ".rs",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".mjs",
-    ".cjs",
-    ".py",
-    ".go",
-    ".java",
-    ".kt",
-    ".kts",
-    ".c",
-    ".cc",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".sh",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".json",
-    ".md",
+# Language-neutral signals: meaningful across ecosystems, counted over all source files.
+# debt_markers are upper-case acronyms; the rest are matched case-insensitively.
+NEUTRAL_SMELLS = {
+    "debt_markers": (("TODO", "FIXME", "HACK", "XXX"), True),
+    "wrapper_markers": (("compat", "legacy", "deprecated", "backward", "shim"), False),
+    "mock_markers": (("mock", "fake", "stub"), False),
+    "policy_keyword_markers": (
+        ("allowlist", "whitelist", "blacklist", "blocklist", "exclusion"),
+        False,
+    ),
+    "secret_markers": (
+        ("api_key", "secret", "token", "password", "private_key", "passwd"),
+        False,
+    ),
+    "protocol_markers": (
+        ("content-length", "transfer-encoding", "chunked", "flush(", "timeout"),
+        False,
+    ),
 }
 
-SOURCE_EXTS = set().union(*LANG_EXTS.values()) - {".yaml", ".yml"}
+# Per-language probes. Counted only for languages actually present in the repo.
+# Add a language here only when its probes express a real, recurring risk class.
+LANG_SMELLS = {
+    "rust": {
+        "unwrap_or_panic": ("unwrap(", "expect(", "panic!", "unreachable!", "todo!(", "unimplemented!"),
+        "raw_json_value": ("serde_json::value", "serde_json::json!", "json!(", "serde_json::Value"),
+        "global_mutable_state": ("static mut ", "lazy_static!", "once_cell", "thread_local!"),
+    },
+    "python": {
+        "bare_assert": ("assert ",),
+        "broad_except": ("except:", "except Exception", "except  Exception"),
+        "not_implemented": ("NotImplementedError",),
+        "global_state": ("\nglobal ", "globals()["),
+    },
+    "typescript": {
+        "escape_any": (": any", "as any", "<any>", "@ts-ignore", "@ts-expect-error"),
+        "non_null_assertion": ("!.", "!["),
+        "console_log": ("console.log",),
+    },
+    "javascript": {
+        "console_log": ("console.log",),
+        "ts_ignore": ("@ts-ignore",),
+    },
+    "go": {
+        "panic_or_fatal": ("panic(", "log.Fatal", "log.Fatalf"),
+        "ignored_error": ("_, _ =", "_ = err"),
+    },
+    "java": {
+        "print_stacktrace": ("printStackTrace",),
+        "generic_catch": ("catch (Exception", "catch (Throwable"),
+    },
+    "kotlin": {
+        "forced_null": ("!!",),
+    },
+    "c_cpp": {
+        "raw_alloc": ("malloc(", "calloc(", "free("),
+        "unsafe_cast": ("(void *)", "reinterpret_cast", "static_cast"),
+    },
+}
 
-DEBT_MARKERS = ("TODO", "FIXME", "HACK", "XXX")
-WRAPPER_MARKERS = ("compat", "legacy", "deprecated", "backward", "shim")
-MOCK_MARKERS = ("mock", "fake", "stub")
+SOURCE_EXTS = set().union(*LANG_EXTS.values())
 
 
 def iter_files(root: Path) -> Iterable[Path]:
@@ -130,6 +165,22 @@ def marker_exists(root: Path, marker: str) -> list[str]:
     return sorted(matches)[:20]
 
 
+def count_tokens(text: str, tokens: tuple[str, ...], case_sensitive: bool) -> int:
+    hay = text if case_sensitive else text.lower()
+    total = 0
+    for tok in tokens:
+        needle = tok if case_sensitive else tok.lower()
+        total += hay.count(needle)
+    return total
+
+
+def lang_of(path: Path) -> str | None:
+    for lang, exts in LANG_EXTS.items():
+        if path.suffix in exts:
+            return lang
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".", help="repository root")
@@ -141,9 +192,9 @@ def main() -> int:
 
     languages: dict[str, int] = {key: 0 for key in LANG_EXTS}
     for path in files:
-        for lang, exts in LANG_EXTS.items():
-            if path.suffix in exts:
-                languages[lang] += 1
+        lang = lang_of(path)
+        if lang:
+            languages[lang] += 1
 
     evidence: dict[str, list[str]] = {}
     for group, markers in MARKERS.items():
@@ -172,20 +223,15 @@ def main() -> int:
 
     large_files: list[dict[str, int | str]] = []
     utility_files: list[str] = []
-    marker_counts = {
-        "debt_markers": 0,
-        "wrapper_markers": 0,
-        "mock_markers": 0,
-        "raw_json_or_dict_markers": 0,
-        "panic_or_assert_markers": 0,
-        "policy_or_default_markers": 0,
-        "secret_markers": 0,
-        "global_state_markers": 0,
-        "protocol_markers": 0,
+    neutral_counts = {key: 0 for key in NEUTRAL_SMELLS}
+    # Only track smell counts for languages that have BOTH source files and probes.
+    lang_smell_counts: dict[str, dict[str, int]] = {
+        lang: {smell: 0 for smell in probes}
+        for lang, probes in LANG_SMELLS.items()
+        if languages.get(lang, 0) > 0
     }
 
     for path in files:
-        name = path.name.lower()
         stem = path.stem.lower()
         if stem in {"utils", "helper", "helpers", "common", "misc"}:
             utility_files.append(rel(root, path))
@@ -196,40 +242,19 @@ def main() -> int:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+
         line_count = text.count("\n") + 1
         if line_count >= 800:
             large_files.append({"path": rel(root, path), "lines": line_count})
 
-        upper = text.upper()
-        marker_counts["debt_markers"] += sum(upper.count(marker) for marker in DEBT_MARKERS)
-        lower = text.lower()
-        marker_counts["wrapper_markers"] += sum(lower.count(marker) for marker in WRAPPER_MARKERS)
-        marker_counts["mock_markers"] += sum(lower.count(marker) for marker in MOCK_MARKERS)
-        marker_counts["raw_json_or_dict_markers"] += lower.count("serde_json::value")
-        marker_counts["raw_json_or_dict_markers"] += lower.count("json!")
-        marker_counts["panic_or_assert_markers"] += lower.count("unwrap(")
-        marker_counts["panic_or_assert_markers"] += lower.count("expect(")
-        marker_counts["panic_or_assert_markers"] += lower.count("panic!")
-        marker_counts["policy_or_default_markers"] += lower.count("allowlist")
-        marker_counts["policy_or_default_markers"] += lower.count("whitelist")
-        marker_counts["policy_or_default_markers"] += lower.count("blacklist")
-        marker_counts["policy_or_default_markers"] += lower.count("exclusion")
-        marker_counts["policy_or_default_markers"] += lower.count("unwrap_or_default")
-        marker_counts["policy_or_default_markers"] += lower.count("default::default")
-        marker_counts["secret_markers"] += lower.count("api_key")
-        marker_counts["secret_markers"] += lower.count("secret")
-        marker_counts["secret_markers"] += lower.count("token")
-        marker_counts["secret_markers"] += lower.count("password")
-        marker_counts["secret_markers"] += lower.count("private_key")
-        marker_counts["global_state_markers"] += lower.count("static mut")
-        marker_counts["global_state_markers"] += lower.count("lazy_static")
-        marker_counts["global_state_markers"] += lower.count("once_cell")
-        marker_counts["global_state_markers"] += lower.count("thread_local")
-        marker_counts["protocol_markers"] += lower.count("content-length")
-        marker_counts["protocol_markers"] += lower.count("transfer-encoding")
-        marker_counts["protocol_markers"] += lower.count("chunked")
-        marker_counts["protocol_markers"] += lower.count("flush(")
-        marker_counts["protocol_markers"] += lower.count("timeout")
+        for key, (tokens, case_sensitive) in NEUTRAL_SMELLS.items():
+            neutral_counts[key] += count_tokens(text, tokens, case_sensitive)
+
+        lang = lang_of(path)
+        if lang and lang in lang_smell_counts:
+            lower = text.lower()
+            for smell, tokens in LANG_SMELLS[lang].items():
+                lang_smell_counts[lang][smell] += sum(lower.count(tok.lower()) for tok in tokens)
 
     likely_profiles = []
     if evidence["rust"] or languages["rust"]:
@@ -251,15 +276,16 @@ def main() -> int:
         "test_files_sample": test_files,
         "docs_sample": docs,
         "cleanliness_signals": {
+            "neutral": neutral_counts,
+            "language_smells": lang_smell_counts,
             "large_files": sorted(large_files, key=lambda item: int(item["lines"]), reverse=True)[:30],
             "utility_files": sorted(utility_files)[:50],
-            "marker_counts": marker_counts,
         },
         "likely_profiles": sorted(set(likely_profiles)),
         "guardrail_questions": [
             "Which code paths are semantic owners, and which are only adapters?",
             "Which tests are PR gates vs product acceptance gates?",
-            "Which release artifacts exist, and are they signed/verifiable?",
+            "Which release artifacts exist, and are they signed/verifiable (SLSA provenance)?",
             "Which completion claims require remote CI or manual runner evidence?",
             "Which policy/rule/default semantics have exactly one source of truth?",
             "Which layers fail open, fail closed, or degrade, and where is that visible?",

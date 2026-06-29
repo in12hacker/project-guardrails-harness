@@ -14,6 +14,12 @@ Rules must evolve with the project. Stale rules are architecture debt.
 | `superseded` | replaced by stronger/newer rule | historical link |
 | `deleted` | obsolete and removed | no enforcement |
 
+## Ratcheting And AI-Generated Code (2026)
+
+- **Ratchet = "don't make it worse".** A PR may not increase measured debt (violation count, uncovered lines, hotspot code-health drop) beyond the current baseline; legacy is grandfathered until touched. Prefer this over flat thresholds, which reward gaming and block useful deletes.
+- **Turn decisions into fitness functions.** An ADR or architecture rule should be enforced, not merely documented: render it as a runnable check (a test, a static-analysis rule, an OPA policy) that fails the PR when violated. A doc claim is a hypothesis; a runnable check is evidence.
+- **Verification, not approval, for AI-generated code.** Human approval does not scale against AI-generated volume; the gate is that the change satisfies spec/tests/contracts/owners, not that a human rubber-stamped it. Code Health (complexity) can flag code too tangled for safe automated refactoring.
+
 ## Continuous Update Loop
 
 Run this loop after each meaningful PR, audit, incident, milestone closeout, or repeated review finding:

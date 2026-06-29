@@ -33,7 +33,8 @@ def main() -> int:
     lines.append(f"- Tests sampled: {len(scan.get('test_files_sample', []))}")
     lines.append(f"- Docs sampled: {len(scan.get('docs_sample', []))}")
     cleanliness = scan.get("cleanliness_signals", {})
-    marker_counts = cleanliness.get("marker_counts", {})
+    neutral = cleanliness.get("neutral", {})
+    lang_smells = cleanliness.get("language_smells", {})
     lines.append(f"- Large files sampled: {len(cleanliness.get('large_files', []))}")
     lines.append(f"- Utility/helper files sampled: {len(cleanliness.get('utility_files', []))}")
     lines.append("")
@@ -84,17 +85,31 @@ def main() -> int:
     lines.append("")
     lines.append("## Cleanliness Signals")
     lines.append("")
-    lines.append("| Signal | Count / sample |")
+    lines.append("### Language-neutral")
+    lines.append("")
+    lines.append("| Signal | Count |")
     lines.append("|---|---|")
-    lines.append(f"| Debt markers | {marker_counts.get('debt_markers', 0)} |")
-    lines.append(f"| Wrapper markers | {marker_counts.get('wrapper_markers', 0)} |")
-    lines.append(f"| Mock markers | {marker_counts.get('mock_markers', 0)} |")
-    lines.append(f"| Raw JSON/dict markers | {marker_counts.get('raw_json_or_dict_markers', 0)} |")
-    lines.append(f"| Panic/assert markers | {marker_counts.get('panic_or_assert_markers', 0)} |")
-    lines.append(f"| Policy/default markers | {marker_counts.get('policy_or_default_markers', 0)} |")
-    lines.append(f"| Secret markers | {marker_counts.get('secret_markers', 0)} |")
-    lines.append(f"| Global state markers | {marker_counts.get('global_state_markers', 0)} |")
-    lines.append(f"| Protocol markers | {marker_counts.get('protocol_markers', 0)} |")
+    for key, label in [
+        ("debt_markers", "Debt markers (TODO/FIXME/HACK/XXX)"),
+        ("wrapper_markers", "Wrapper markers (compat/legacy/shim)"),
+        ("mock_markers", "Mock markers"),
+        ("policy_keyword_markers", "Policy keywords (allowlist/exclusion)"),
+        ("secret_markers", "Secret keywords"),
+        ("protocol_markers", "Protocol keywords"),
+    ]:
+        lines.append(f"| {label} | {neutral.get(key, 0)} |")
+    lines.append("")
+    lines.append("### Per-language smells (only languages present in the repo)")
+    lines.append("")
+    if lang_smells:
+        lines.append("| Language | Smell | Count |")
+        lines.append("|---|---|---|")
+        for lang in sorted(lang_smells):
+            for smell, count in sorted(lang_smells[lang].items()):
+                lines.append(f"| {lang} | {smell} | {count} |")
+    else:
+        lines.append("_No recognized source languages with smell probes matched._")
+    lines.append("")
     large_sample = ", ".join(
         f"`{item['path']}` ({item['lines']})"
         for item in cleanliness.get("large_files", [])[:5]

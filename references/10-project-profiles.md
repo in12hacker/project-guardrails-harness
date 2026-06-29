@@ -16,6 +16,7 @@ ProjectProfile:
   deployment_model:
   existing_ci:
   acceptance_surface:
+  ownership_model:                 # strong | weak | collective; team/domain-aligned CODEOWNERS (not folder-aligned)
 ```
 
 ## Project Types

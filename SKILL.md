@@ -1,6 +1,6 @@
 ---
 name: project-guardrails-harness
-description: Use when asked to create, audit, migrate, or adapt engineering rules, architecture guardrails, CI quality gates, verification harnesses, release criteria, or project-specific development standards for a software project. Use this to turn a repository into evidence-backed rules rather than relying on documentation claims.
+description: Use when asked to create, audit, migrate, or adapt engineering rules, architecture guardrails, CI quality gates, verification harnesses, release criteria, CODEOWNERS / ownership boundaries, supply-chain assurance (SLSA, build provenance, artifact signing), technical-debt ratchets, ADRs, or project-specific development standards for ANY software project — library, web app, backend service, infrastructure, security product, mobile, embedded, data platform, or AI agent system. Use this to turn a repository into evidence-backed rules (anchored to code paths, owners, CI/runtime evidence, and a verification plan) instead of trusting documentation or claims. Trigger it whenever someone wants guardrails, quality gates, release readiness, an owner map, or to check whether docs/ADRs still match the code — even if they never say the word "guardrails".
 ---
 
 # Project Guardrails Harness
@@ -14,7 +14,13 @@ Use **Evidence over Claims**. Documentation, issue comments, and team assertions
 ## Workflow
 
 1. **Scan the repo**
-   - Run `python3 .claude/skills/project-guardrails-harness/scripts/scan_project.py --root . --out /tmp/project-guardrails-scan.json` when available.
+   - The skill ships a scanner at `scripts/scan_project.py`, inside this skill's own folder. Run it from the target repo root so it works no matter where the skill is installed (personal, project, or plugin scope):
+     ```bash
+     SCAN="${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/project-guardrails-harness}/scripts/scan_project.py"
+     [ -f "$SCAN" ] || SCAN=".claude/skills/project-guardrails-harness/scripts/scan_project.py"
+     python3 "$SCAN" --root . --out "/tmp/project-guardrails-scan-$(basename "$(pwd)")-$$.json"
+     ```
+     Claude Code sets `${CLAUDE_SKILL_DIR}` to this skill's directory at runtime. If a client does not export it, the first fallback resolves the personal-scope path and the second the project-scope path, so the command is portable instead of pinned to one install location. The output filename embeds the repo name and shell PID, so back-to-back runs on different repos (or concurrent sessions) don't overwrite each other's scan — pass the resulting path to the renderer. If the scanner still cannot be found, collect the evidence manually (next bullet).
    - If the script is unavailable, manually collect the same evidence: languages, package managers, CI files, tests, docs, release files, security files, deployment files, public contracts.
 
 2. **Classify the project**

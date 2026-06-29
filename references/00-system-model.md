@@ -21,10 +21,12 @@ Use current official or authoritative standards as anchors, then adapt to reposi
 | Source | Portable lesson |
 |---|---|
 | NIST SSDF SP 800-218 | Secure development practices must be embedded across the SDLC and used to reduce vulnerabilities and recurrence. |
-| SLSA v1.2 | Supply-chain claims require source/build tracks, artifact provenance, and verification. |
+| SLSA v1.0 Build Track (L1–L3) | Supply-chain claims require signed build provenance from a hosted (L2) or hardened/isolated (L3) builder — and that provenance must be **verified at deploy**. Provenance that is produced but never verified is theater. |
 | OpenSSF Scorecard | Repository security can be checked through CI, review, branch protection, pinned dependencies, token permissions, packaging, signed releases, fuzzing, SAST, and dependency health. |
 | OWASP SAMM | Assurance work fits Governance, Design, Implementation, Verification, and Operations. |
 | C4 + ADR | Architecture must be explainable by context/container/component/code views and durable decisions. |
+| CODEOWNERS / service catalog (Backstage) | Ownership is a team/domain concept, not a file path; it gates changes, routes incidents, and feeds policy-as-code. |
+| Ratcheting & Code Health (testdouble, CodeScene) | Debt is paid down with "don't make it worse" gates (ratchets) and shall-not requirements, prioritized where change is expensive (hotspots). |
 | Google Engineering Practices | Reviews should evaluate design, functionality, complexity, tests, naming, comments, and context. |
 | Rust API Guidelines | Naming, conversions, type safety, dependability, and debuggability are API quality controls. |
 | C++ Core Guidelines F.15-F.21 | Parameter passing must make input/output direction, ownership, mutation, and return values explicit. |
@@ -82,7 +84,7 @@ A rule without a verification path is advisory. Hard gates require reliable auto
 2. **Do not treat language as product type.** Rust can be a CLI, kernel tool, SaaS backend, or SDK.
 3. **Do not let adapters become owners.** Routes/controllers/UI/daemon scripts are usually adapters, not semantic owners.
 4. **Do not collapse acceptance levels.** Unit, mock, contract, real-stack, product acceptance, and release evidence prove different things.
-5. **Do not overclaim supply-chain maturity.** Dependency scan is not release-grade provenance.
+5. **Do not overclaim supply-chain maturity.** A dependency scan is not provenance, and produced provenance is not assurance unless it is verified at deploy (SLSA Build L2/L3 + Sigstore + Trusted Publishing).
 6. **Do not add abstractions without deletion.** Abstractions should remove duplication, drift, or platform coupling.
 7. **Do not store stale rules.** Rules need owners, status, review dates, and deletion/supersession paths.
 8. **Do not turn fallback into silence.** Fail-open/fail-closed is a layer decision with typed degraded evidence.

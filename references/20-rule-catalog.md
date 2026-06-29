@@ -73,11 +73,13 @@ ArchitectureGate:
 ```text
 OwnerRule:
   semantic_key:
-  current_owner:
+  current_owner:                   # team/domain (preferred) or individual; derive from CODEOWNERS first
+  ownership_model:                 # strong | weak | collective
   desired_owner:
   allowed_callers:
   forbidden_callers:
   owner_api:
+  codeowners_entry:                # the CODEOWNERS line that enforces review (watch the 3 MB silent-failure cap)
   migration_plan:
   verification:
 ```
@@ -309,29 +311,35 @@ Examples:
 
 ## 11. Supply Chain and Release
 
-Purpose: prevent overclaiming artifact trust.
+Purpose: prevent overclaiming artifact trust. Calibrate against **SLSA v1.0 Build Track** (L0 none, L1 provenance exists, L2 signed provenance from a hosted builder, L3 hardened/isolated builder). Provenance is worthless unless it is **verified at consumption/deploy**, not only produced.
 
 ```text
 SupplyChainGate:
-  dependency_scan:
+  dependency_scan:                 # vuln scan: cargo audit / npm audit / pip-audit / govulncheck
+  dependency_admission:            # OpenSSF Scorecard / dependency-review on INCOMING deps
   license_policy:
   lockfile_policy:
-  sbom:
-  provenance:
-  signed_or_verifiable_artifacts:
-  workflow_token_permissions:
-  action_or_tool_pinning:
+  sbom:                            # attestable SBOM predicate
+  provenance_level:                # SLSA Build L1 | L2 | L3
+  signing:                         # Sigstore/cosign, npm provenance, GitHub artifact attestation
+  trusted_publishing:              # OIDC; no long-lived publish tokens
+  artifact_verified_at_deploy:     # slsa-verifier / gh attestation verify BEFORE deploy
+  workflow_token_permissions:      # least-privilege GITHUB_TOKEN
+  action_or_tool_pinning:          # pinned by SHA, not floating tags
   release_claim_level:
 ```
 
-Claim levels:
+Claim levels (each backed by evidence, not assertion):
 
 ```text
 dependency_scan_present
 ci_supply_chain_gate_passed
-artifact_verifiable
+artifact_verifiable                 # signed artifact + SBOM
+provenance_verified_at_deploy      # SLSA L2/L3 AND verified, not merely produced
 release_grade_supply_chain_assurance
 ```
+
+Reject if "release-grade" is claimed from a dependency scan alone, or if provenance is produced but never verified at deploy.
 
 ## 12. Operations, Version, and Coverage Truth
 

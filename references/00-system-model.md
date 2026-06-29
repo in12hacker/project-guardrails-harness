@@ -121,6 +121,7 @@ ProjectGuardrails:
   harness_matrix:
   adoption_plan:
   lifecycle_plan:
+  project_memory:
   unresolved_decisions:
   sources:
 ```

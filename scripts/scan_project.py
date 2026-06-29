@@ -63,6 +63,13 @@ MARKERS = {
     "openapi": ["openapi.yaml", "openapi.yml", "swagger.yaml"],
     "security": ["SECURITY.md", "deny.toml", ".github/dependabot.yml", "CODEOWNERS"],
     "release": ["Makefile", "justfile", ".goreleaser.yml", "release.yml"],
+    "guardrails": [
+        ".guardrails/INDEX.md",
+        ".guardrails/memory.md",
+        ".guardrails/rules/hard.md",
+        ".guardrails/harness.md",
+        ".guardrails/decisions.md",
+    ],
 }
 
 TEST_HINTS = (
@@ -190,10 +197,13 @@ def main() -> int:
     files = list(iter_files(root))
 
     languages: dict[str, int] = {key: 0 for key in LANG_EXTS}
+    language_file_samples: dict[str, list[str]] = {key: [] for key in LANG_EXTS}
     for path in files:
         lang = lang_of(path)
         if lang:
             languages[lang] += 1
+            if len(language_file_samples[lang]) < 20:
+                language_file_samples[lang].append(rel(root, path))
 
     evidence: dict[str, list[str]] = {}
     for group, markers in MARKERS.items():
@@ -257,21 +267,41 @@ def main() -> int:
             for smell, tokens in LANG_SMELLS[lang].items():
                 lang_smell_counts[lang][smell] += sum(lower.count(tok.lower()) for tok in tokens)
 
+    profile_hints = []
     likely_profiles = []
     if evidence["rust"] or languages["rust"]:
-        likely_profiles.append("rust")
+        profile_hints.append("rust")
+    if evidence["python"] or languages["python"]:
+        profile_hints.append("python")
+    if languages["shell"]:
+        profile_hints.append("shell")
     if evidence["node"] or languages["typescript"] or languages["javascript"]:
-        likely_profiles.append("web_or_node")
+        profile_hints.append("web_or_node")
+    if languages["go"]:
+        profile_hints.append("go")
+    if languages["java"] or languages["kotlin"]:
+        profile_hints.append("jvm")
+    if languages["c_cpp"]:
+        profile_hints.append("native")
     if evidence["docker"] or evidence["kubernetes"]:
         likely_profiles.append("infra_or_service")
     if evidence["openapi"]:
         likely_profiles.append("api_service")
+    if evidence["release"]:
+        profile_hints.append("release_artifact_producer")
+    if evidence["guardrails"]:
+        profile_hints.append("existing_guardrails")
     if any("e2e" in p.lower() or "playwright" in p.lower() for p in test_files):
         likely_profiles.append("product_or_web_e2e")
 
     result = {
         "root": str(root),
         "languages": {k: v for k, v in languages.items() if v},
+        "language_file_samples": {
+            k: sorted(v)
+            for k, v in language_file_samples.items()
+            if v
+        },
         "evidence": evidence,
         "ci_files": ci_files,
         "test_files_sample": test_files,
@@ -283,6 +313,7 @@ def main() -> int:
             "utility_files": sorted(utility_files)[:50],
         },
         "likely_profiles": sorted(set(likely_profiles)),
+        "profile_hints": sorted(set(profile_hints)),
         "guardrail_questions": [
             "Which code paths are semantic owners, and which are only adapters?",
             "Which tests are PR gates vs product acceptance gates?",
@@ -293,6 +324,7 @@ def main() -> int:
             "Where do plaintext secrets exist, and how are reload/rotation/delete paths verified?",
             "Which runtime or protocol constraints need profile-specific tests?",
             "Which coverage exclusions are replaced by stronger real-stack evidence?",
+            "Which learned facts belong in memory.md, and which are still unresolved decisions?",
         ],
     }
 

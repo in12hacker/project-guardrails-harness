@@ -13,6 +13,7 @@ Use it when asked to:
 
 - create, audit, migrate, or adapt engineering rules / architecture guardrails,
 - design CI quality gates, verification harnesses, release criteria,
+- evolve durable project memory from observed coding work,
 - turn a repository's claims into evidence-backed, project-specific development
   standards.
 
@@ -50,9 +51,11 @@ ln -s /path/to/project-guardrails-harness \
   <project>/.claude/skills/project-guardrails-harness
 ```
 
-Once in place, Claude Code loads it automatically. The skill expects to live at
-`.claude/skills/project-guardrails-harness/` (the scan script is invoked from
-there).
+Once in place, Claude Code loads it automatically. At runtime, `SKILL.md`
+prefers the `CLAUDE_SKILL_DIR` path when Claude exposes it, then falls back to
+the personal and project `.claude/skills/project-guardrails-harness/` locations.
+If you keep the skill somewhere else, run the scripts by explicit path or set
+`CLAUDE_SKILL_DIR` before invoking the snippets.
 
 ## License
 

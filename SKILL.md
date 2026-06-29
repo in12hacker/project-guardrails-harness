@@ -52,21 +52,28 @@ Use **Evidence over Claims**. Documentation, issue comments, and team assertions
 
 ## Output Shape
 
-Prefer this structure:
+Emit a **progressive-disclosure directory**, not one monolithic file. An agent loads `INDEX.md` every time and reads the other files just-in-time by relevance (a release reads `supply-chain.md` + the release row of `harness.md`; a PR review reads `rules/hard.md`). A single big file buries critical rules mid-document — where models recall worst ("lost in the middle") — and re-costs tokens on every read. Scaffold it from the scan with the renderer:
+
+```bash
+SCAN_R="${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/project-guardrails-harness}/scripts/render_guardrails.py"
+[ -f "$SCAN_R" ] || SCAN_R=".claude/skills/project-guardrails-harness/scripts/render_guardrails.py"
+python3 "$SCAN_R" "<your-scan.json>" --out-dir .guardrails/
+```
 
 ```text
-ProjectGuardrails:
-  project_profile:
-  evidence_inventory:
-  owner_map:
-  hard_rules:
-  advisory_rules:
-  harness_matrix:
-  ci_delta:
-  migration_plan:
-  unresolved_decisions:
-  sources:
+.guardrails/
+├── INDEX.md          # ALWAYS loaded: one-line profile, owner summary, hard-gate shortlist, links (keep <150 lines)
+├── profile.md        # project profile + evidence inventory
+├── owners.md         # owner map (semantic owners vs adapters)
+├── rules/
+│   ├── hard.md       # hard gates: trigger / owner / evidence / reject / verify
+│   └── advisory.md   # advisory rules + ratchet plan
+├── harness.md        # tiered gate matrix (PR / closeout / product / release) + commands
+├── supply-chain.md   # release / supply-chain gates (load when touching releases)
+└── decisions.md      # unresolved decisions + migration/ratchet plan + sources
 ```
+
+Keep `INDEX.md` under ~150 lines and each file under ~300 lines; put the most safety-critical REJECT conditions near the **top** of a file, never the middle; use relative links so the set is portable. (`render_guardrails.py --out FILE` still emits a single combined doc for humans / full-text search.)
 
 ## When More Context Is Needed
 

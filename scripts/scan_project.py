@@ -60,8 +60,7 @@ MARKERS = {
     "java": ["pom.xml", "build.gradle", "build.gradle.kts"],
     "docker": ["Dockerfile", "docker-compose.yml", "compose.yml"],
     "kubernetes": ["Chart.yaml", "kustomization.yaml"],
-    "github_actions": [".github/workflows"],
-    "openapi": ["openapi.yaml", "openapi.yml", "swagger.yaml", "api"],
+    "openapi": ["openapi.yaml", "openapi.yml", "swagger.yaml"],
     "security": ["SECURITY.md", "deny.toml", ".github/dependabot.yml", "CODEOWNERS"],
     "release": ["Makefile", "justfile", ".goreleaser.yml", "release.yml"],
 }
@@ -92,7 +91,7 @@ NEUTRAL_SMELLS = {
         False,
     ),
     "protocol_markers": (
-        ("content-length", "transfer-encoding", "chunked", "flush(", "timeout"),
+        ("content-length", "transfer-encoding", "chunked"),
         False,
     ),
 }
@@ -132,7 +131,7 @@ LANG_SMELLS = {
         "forced_null": ("!!",),
     },
     "c_cpp": {
-        "raw_alloc": ("malloc(", "calloc(", "free("),
+        "raw_alloc": ("malloc(", "calloc(", "realloc("),
         "unsafe_cast": ("(void *)", "reinterpret_cast", "static_cast"),
     },
 }
@@ -239,11 +238,13 @@ def main() -> int:
         if path.suffix.lower() not in SOURCE_EXTS:
             continue
         try:
+            if ".min." in path.name.lower() or path.stat().st_size > 1_000_000:
+                continue
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
 
-        line_count = text.count("\n") + 1
+        line_count = len(text.splitlines())
         if line_count >= 800:
             large_files.append({"path": rel(root, path), "lines": line_count})
 

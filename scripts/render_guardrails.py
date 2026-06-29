@@ -128,8 +128,6 @@ def sec_cleanliness(scan: dict) -> str:
     neutral = cleanliness.get("neutral", {})
     lang_smells = cleanliness.get("language_smells", {})
     lines = [
-        "## Cleanliness Signals",
-        "",
         "### Language-neutral",
         "",
         "| Signal | Count |",
@@ -252,7 +250,7 @@ def build_single(scan: dict) -> str:
         sec_rules_hard(),
         "",
         sec_rules_advisory(),
-        sec_cleanliness(scan),
+        "## Cleanliness Signals\n\n" + sec_cleanliness(scan),
         sec_harness(),
         sec_supply_chain(),
         sec_decisions(scan),
@@ -266,7 +264,7 @@ def build_index(scan: dict) -> str:
     ci = scan.get("ci_files", [])
     profiles = scan.get("likely_profiles", [])
     root = scan.get("root", "")
-    basename = Path(root).name if root else "project"
+    basename = Path(root).name or "project"
     lines = [
         f"# Project Guardrails — {basename}",
         "",
@@ -274,6 +272,7 @@ def build_index(scan: dict) -> str:
         "> - reviewing a PR → [`rules/hard.md`](rules/hard.md) + [`harness.md`](harness.md)",
         "> - cutting a release → [`supply-chain.md`](supply-chain.md) + the release row of [`harness.md`](harness.md)",
         "> - an ownership question → [`owners.md`](owners.md)",
+        "> - a refactor / cleanup → [`cleanliness.md`](cleanliness.md) + [`rules/advisory.md`](rules/advisory.md)",
         "> A single monolithic guardrails file buries critical rules mid-document and re-costs tokens on every read; this split avoids that.",
         "",
         "## Profile (one-liner)",
@@ -291,6 +290,7 @@ def build_index(scan: dict) -> str:
         "- [`owners.md`](owners.md) — owner map (owners vs adapters)",
         "- [`rules/hard.md`](rules/hard.md) — hard gates (trigger/owner/evidence/reject/verify)",
         "- [`rules/advisory.md`](rules/advisory.md) — advisory rules + ratchet plan",
+        "- [`cleanliness.md`](cleanliness.md) — debt / smell / large-file inventory (language-aware)",
         "- [`harness.md`](harness.md) — tiered gate matrix + commands",
         "- [`supply-chain.md`](supply-chain.md) — release / supply-chain gates",
         "- [`decisions.md`](decisions.md) — unresolved decisions + migration plan + sources",
@@ -306,6 +306,7 @@ def build_multi(scan: dict) -> "dict[str, str]":
         "owners.md": sec_owners(scan),
         "rules/hard.md": sec_rules_hard(),
         "rules/advisory.md": sec_rules_advisory(),
+        "cleanliness.md": "# Cleanliness Signals\n\n" + sec_cleanliness(scan),
         "harness.md": sec_harness(),
         "supply-chain.md": sec_supply_chain(),
         "decisions.md": sec_decisions(scan),

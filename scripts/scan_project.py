@@ -159,6 +159,19 @@ _AUDIT_TOKENS = frozenset({
     "metric", "metrics", "observ", "observer", "observability",
 })
 
+_BOUNDARY_TOKENS = frozenset({
+    "agent", "assembler", "boundary", "bridge", "classifier", "decoder",
+    "ebpf", "enforce", "enforcement", "filter", "gateway", "hook",
+    "intercept", "kernel", "mcp", "observer", "parser", "policy",
+    "protocol", "proxy", "runtime", "sandbox", "stream", "tool",
+})
+
+_BOUNDARY_TEST_TOKENS = frozenset({
+    "boundary", "fragment", "fuzz", "isolation", "malformed",
+    "negative", "partial", "property", "recovery", "regression",
+    "robust", "timeout",
+})
+
 
 # --- Domain-neutral evidence collectors -------------------------------------
 # The scanner does NOT classify the project (no keyword profiles). It surfaces
@@ -397,6 +410,21 @@ def main() -> int:
         for p in files
         if p.stem.lower() in {"main", "app", "cli", "server", "index", "wsgi", "asgi", "manage", "handler", "route"}
     )[:20]
+    boundary_samples = sorted(
+        rel(root, p)
+        for p in files
+        if p.suffix.lower() in SOURCE_EXTS
+        and any(tok in _BOUNDARY_TOKENS for tok in p.stem.lower().replace("-", "_").replace(".", "_").split("_"))
+    )[:40]
+    boundary_test_samples = sorted(
+        rel(root, p)
+        for p in files
+        if (
+            any(part.lower() in TEST_HINTS for part in p.parts)
+            or any(hint in p.name.lower() for hint in TEST_HINTS)
+        )
+        and any(tok in _BOUNDARY_TEST_TOKENS for tok in p.stem.lower().replace("-", "_").replace(".", "_").split("_"))
+    )[:40]
 
     ci_files = []
     workflows = root / ".github" / "workflows"
@@ -463,6 +491,8 @@ def main() -> int:
         "docs_sample": docs,
         "audit_samples": audit_samples,
         "entry_samples": entry_samples,
+        "boundary_samples": boundary_samples,
+        "boundary_test_samples": boundary_test_samples,
         "cleanliness_signals": {
             "neutral": neutral_counts,
             "language_smells": lang_smell_counts,
@@ -484,6 +514,7 @@ def main() -> int:
             "Which layers fail open, fail closed, or degrade, and where is that visible?",
             "Where do plaintext secrets exist, and how are reload/rotation/delete paths verified?",
             "Which runtime or protocol constraints need profile-specific tests?",
+            "Which boundaries need BoundaryRobustness tests for weak hints, malformed input, isolation, ID-domain separation, state precedence, false positives/negatives, and pre-effect timing?",
             "Which coverage exclusions are replaced by stronger real-stack evidence?",
             "Which learned facts belong in memory.md, and which are still unresolved decisions?",
         ],

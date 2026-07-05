@@ -29,6 +29,46 @@ Project memory is not a place for guesses. Record a fact only with evidence, and
 
 Use `decisions.md` for unresolved hypotheses. Use `memory.md` only for durable facts with code paths, evidence, and a status.
 
+## Candidate Project Rules
+
+`rules/candidates.md` is the bridge between generic guardrail families and a project's eventual local rules. It is not an authority file. It is a queue of evidence-backed drafts that a maintainer can accept, rewrite, split, or reject.
+
+Use candidates when the scan or recent work suggests a project-specific invariant, but the exact wording, owner, reject condition, or runnable check still needs human validation.
+
+```text
+CandidateProjectRule:
+  title:
+  rule_family:
+  candidate_rule:
+  evidence:
+    self_description:
+    paths:
+    existing_instruction_files:
+    build_or_ci_targets:
+    test_or_harness_paths:
+  confidence: low|medium|high
+  human_validation_required: yes
+  owner_to_confirm:
+  reject_if:
+  verification_gap:
+  promotion_path: decisions.md -> memory.md -> rules/advisory.md -> rules/hard.md
+```
+
+Promotion requirements:
+
+- `proposal`: static scan or one coding task suggests the rule.
+- `advisory`: project owner accepts the invariant and false positives are still being calibrated.
+- `ratchet`: the project can measure violations and prevent new debt.
+- `hard_gate`: a stable command or CI job enforces the rule with acceptable false positives.
+
+Reject or rewrite a candidate when:
+
+- it restates an existing project instruction instead of linking to it;
+- it was inferred from keywords alone, without code paths or build/test evidence;
+- the profile or owner map is still ambiguous;
+- the verification command is fabricated or only proves a mock/contract surface;
+- the wording contains project-specific names that belong in the generated `.guardrails/` output, not in the portable skill.
+
 ## Ratcheting And AI-Generated Code (2026)
 
 - **Ratchet = "don't make it worse".** A PR may not increase measured debt (violation count, uncovered lines, hotspot code-health drop) beyond the current baseline; legacy is grandfathered until touched. Prefer this over flat thresholds, which reward gaming and block useful deletes.

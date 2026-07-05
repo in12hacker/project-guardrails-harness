@@ -67,6 +67,7 @@ Rules are grouped by concern:
 - code cleanliness and code reduction;
 - policy, rule, and configuration source of truth;
 - testing and harness truthfulness;
+- boundary robustness for protocol/runtime/tool/security edges;
 - resilience and failure semantics;
 - security, privacy, and secret lifecycle;
 - runtime and protocol integrity;

@@ -28,6 +28,7 @@ HarnessMatrix:
   security:
   secret_lifecycle:
   runtime_protocol:
+  boundary_robustness:
   version_coverage:
   coverage:
   performance:
@@ -141,6 +142,40 @@ RuntimeProtocolHarness:
 ```
 
 Examples: eBPF verifier/build checks, mobile device permissions, browser CDP workflows, proxy streaming completion, API pagination, UTF-8-safe previews, and shutdown/flush contracts.
+
+## Boundary Robustness Harness
+
+Use this harness for protocol classifiers, streaming parsers, runtime observers, proxies, agent/tool bridges, kernel/user boundaries, and security enforcement points. It catches false positives, false negatives, broken isolation, silent degradation, and post-effect enforcement claims that ordinary unit/integration/e2e gates often miss.
+
+```text
+BoundaryRobustnessHarness:
+  boundary_name:
+  owner_module:
+  product_risk:
+  strong_signal_positive_tests:
+  weak_signal_negative_tests:
+  non_target_false_positive_tests:
+  malformed_or_partial_input_tests:
+  cross_source_isolation_tests:
+  id_domain_separation_tests:
+  effect_target_validation_tests:
+  state_precedence_tests:
+  recovery_after_bad_input_tests:
+  pre_effect_or_commit_point_tests:
+  observability_or_degraded_tests:
+  cleanup:
+```
+
+Design rules:
+
+- Start with the real boundary contract, not convenient fixture names.
+- Separate recognition, parsing, state transition, enforcement timing, and product acceptance tests.
+- Test weak hints as negative cases unless the product explicitly accepts hint-only degraded behavior.
+- Use table tests for classifier permutations, but stateful tests for fragmentation, batching, retries, timeout, and recovery.
+- Assert the commit point. For security products, prove the file write, process start, network send, data export, or policy commit did not happen before allow; if that is impossible, record observe-only/degraded residual risk.
+- Add at least one non-target traffic case that looks similar to the target protocol.
+- Add at least one malformed input that must be visible through typed error, degraded status, or audit evidence.
+- Do not let a downstream failure hide an upstream success. When testing observer timing, it is valid to force the downstream dependency to fail if the test asserts observer state before the failure point.
 
 ## Version and Coverage Checks
 

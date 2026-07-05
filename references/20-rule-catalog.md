@@ -10,13 +10,14 @@ Generate rules from these categories. Do not add uncategorized rules unless you 
 4. Domain Model and Parameter Flow
 5. Code Cleanliness, State Ownership, and Code Reduction
 6. Test and Harness Truthfulness
-7. Policy, Rule, and Configuration Source of Truth
-8. Resilience and Failure Semantics
-9. Security, Privacy, and Secret Lifecycle
-10. Runtime and Protocol Integrity
-11. Supply Chain and Release
-12. Operations, Version, and Coverage Truth
-13. Rule Lifecycle
+7. Boundary Robustness
+8. Policy, Rule, and Configuration Source of Truth
+9. Resilience and Failure Semantics
+10. Security, Privacy, and Secret Lifecycle
+11. Runtime and Protocol Integrity
+12. Supply Chain and Release
+13. Operations, Version, and Coverage Truth
+14. Rule Lifecycle
 
 ## 1. Evidence Integrity
 
@@ -205,7 +206,56 @@ TestGate:
 
 Reject if mock/contract tests are counted as product acceptance for non-contract products.
 
-## 7. Policy, Rule, and Configuration Source of Truth
+## 7. Boundary Robustness
+
+Purpose: prevent false green tests around protocol parsers, runtime observers, proxies, agent/tool bridges, kernel/user boundaries, stream assemblers, policy classifiers, or other security-sensitive boundaries.
+
+Use this rule family when a boundary must distinguish target from non-target traffic, parse partial or malformed input, preserve source/session isolation, or enforce before an irreversible side effect.
+
+```text
+BoundaryRobustness:
+  boundary:
+  owner:
+  strong_signals:
+  weak_signals_allowed_only_as_hints:
+  isolation_keys:
+  malformed_inputs:
+  degraded_or_recovery_state:
+  pre_effect_or_commit_point:
+  false_positive_cases:
+  false_negative_cases:
+  known_limitations:
+  verification:
+```
+
+Reject patterns:
+
+- security behavior depends only on weak hints such as executable name, file name, route name, User-Agent, extension, or path fragment;
+- malformed input is silently ignored when it should produce typed degraded/error state;
+- one source/session/process/call fragment can contaminate another;
+- protocol IDs from different domains are stringified and mixed;
+- negative non-target traffic is not tested;
+- denial, rollback, or policy enforcement is claimed after an irreversible side effect already happened;
+- a mock event is used to claim product acceptance for a runtime boundary;
+- a documented limitation is hidden behind a green test instead of recorded with an owner and removal path.
+
+Minimum matrix for boundary tests:
+
+```text
+BoundaryTestMatrix:
+  positive_strong_signal:
+  negative_non_target:
+  weak_signal_rejected:
+  malformed_degraded:
+  cross_source_isolation:
+  id_domain_separation:
+  effect_target_validation:
+  state_precedence:
+  recovery_after_bad_input:
+  pre_effect_assertion:
+```
+
+## 8. Policy, Rule, and Configuration Source of Truth
 
 Purpose: prevent parallel policy semantics and scattered defaults.
 
@@ -231,7 +281,7 @@ Reject patterns:
 - rule matching requires unbounded scans on hot paths without an index or budget;
 - reload failure silently defaults instead of preserving prior valid state or reporting degraded state.
 
-## 8. Resilience and Failure Semantics
+## 9. Resilience and Failure Semantics
 
 Purpose: make fail-open, fail-closed, degraded, fallback, and recovery behavior explicit per layer.
 
@@ -258,7 +308,7 @@ Reject patterns:
 - degraded state coupled to readiness without a product decision;
 - resource limits that stop writes or enforcement silently.
 
-## 9. Security, Privacy, and Secret Lifecycle
+## 10. Security, Privacy, and Secret Lifecycle
 
 Purpose: map trust boundaries and sensitive data handling.
 
@@ -283,7 +333,7 @@ Secret lifecycle rules:
 - secret comparisons use constant-time equality when attacker-observable timing is relevant;
 - audit records prove access or decrypt actions without leaking values.
 
-## 10. Runtime and Protocol Integrity
+## 11. Runtime and Protocol Integrity
 
 Purpose: capture runtime-specific constraints that generic code quality checks miss.
 
@@ -309,7 +359,7 @@ Examples:
 - runtime capability failures must produce status evidence instead of silently switching to mock;
 - event, request, and decision chains need correlation metadata at every adapter boundary.
 
-## 11. Supply Chain and Release
+## 12. Supply Chain and Release
 
 Purpose: prevent overclaiming artifact trust. Calibrate against **SLSA v1.0 Build Track** (L0 none, L1 provenance exists, L2 signed provenance from a hosted builder, L3 hardened/isolated builder). Provenance is worthless unless it is **verified at consumption/deploy**, not only produced.
 
@@ -341,7 +391,7 @@ release_grade_supply_chain_assurance
 
 Reject if "release-grade" is claimed from a dependency scan alone, or if provenance is produced but never verified at deploy.
 
-## 12. Operations, Version, and Coverage Truth
+## 13. Operations, Version, and Coverage Truth
 
 Purpose: make runtime degradation visible.
 
@@ -377,7 +427,7 @@ Reject patterns:
 - pure business logic excluded from coverage because it is hard to test;
 - runtime logs, ledgers, or audit files without rotation, retention, and degraded/full-disk behavior.
 
-## 13. Rule Lifecycle
+## 14. Rule Lifecycle
 
 Purpose: prevent stale or unowned rules.
 

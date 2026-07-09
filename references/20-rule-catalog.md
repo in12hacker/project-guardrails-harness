@@ -18,6 +18,9 @@ Generate rules from these categories. Do not add uncategorized rules unless you 
 12. Supply Chain and Release
 13. Operations, Version, and Coverage Truth
 14. Rule Lifecycle
+15. Module Readiness and Fitness Functions
+16. Interface and Port Contracts
+17. Documentation Deliverables
 
 ## 1. Evidence Integrity
 
@@ -184,6 +187,8 @@ State ownership rules:
 - orchestrators wire dependencies, but must not accumulate unrelated subsystem state;
 - choose the smallest idiomatic primitive that satisfies lifecycle and concurrency needs.
 
+Test code is not a governance exception. Gate-level tests should use owner APIs, semantic builders, and custom assertions instead of copying production parsers, policy matchers, normalizers, or state-machine logic into fixtures.
+
 ## 6. Test and Harness Truthfulness
 
 Purpose: ensure tests prove the stated risk.
@@ -197,6 +202,7 @@ TestGate:
   level: unit|integration|contract|static|real_stack|product_acceptance|release
   size: small|medium|large|manual
   runner:
+  scenario_origin: real_product|cli_equivalent|sensor_smoke|mock_contract
   positive_cases:
   negative_cases:
   evidence_artifacts:
@@ -205,6 +211,8 @@ TestGate:
 ```
 
 Reject if mock/contract tests are counted as product acceptance for non-contract products.
+
+Reject gate tests that have no requirement/test basis, risk or regression link, runner prerequisites, cleanup policy, or scenario origin. Direct API calls, synthetic events, low-level sensor probes, and mocks may be useful lower-layer evidence, but must be downgraded when they bypass the product behavior being claimed.
 
 ## 7. Boundary Robustness
 
@@ -453,3 +461,100 @@ RuleRecord:
   superseded_by:
   last_verified:
 ```
+
+## 15. Module Readiness and Fitness Functions
+
+Purpose: make "stable", "ready", and "stop refactoring" objective instead of preference-driven.
+
+```text
+ModuleReadiness:
+  module:
+  owner:
+  status: production_ready|provisionally_ready|not_ready
+  dimensions:
+    single_owner:
+    dependency_direction:
+    typed_interface_boundary:
+    documentation:
+    tests:
+    error_or_panic_policy:
+    dead_code_or_wrapper_policy:
+    size_or_complexity:
+  exceptions:
+  delete_or_review_by:
+  verification:
+```
+
+```text
+FitnessFunction:
+  id:
+  dimension:
+  script_or_policy:
+  gate: pr|closeout|product_acceptance|release|manual
+  scope:
+  owner:
+  command:
+  baseline_or_ratchet:
+  pass_fail_semantics:
+  last_verified:
+```
+
+Reject patterns:
+
+- a module is declared stable without explicit readiness dimensions and evidence;
+- a reviewer forces refactoring from taste rather than a violated rule or fitness function;
+- a check script exists but is not registered, owned, called by a gate, or intentionally deleted;
+- dependency direction or architecture rules are hardcoded in scripts when a declarative rule source is practical;
+- "stable" is claimed while known violations remain unowned or hidden in allowlists.
+
+## 16. Interface and Port Contracts
+
+Purpose: keep public interfaces, ports, traits, SDK/API contracts, and cross-module signatures typed, consumer-driven, and evolvable.
+
+```text
+InterfaceContract:
+  owner:
+  consumers:
+  capability_or_contract:
+  methods_or_endpoints:
+  typed_inputs:
+  typed_outcomes:
+  typed_errors:
+  wire_domain_mapper:
+  sync_async_boundary:
+  object_or_dynamic_dispatch_policy:
+  compatibility_or_delete_by:
+  contract_tests:
+```
+
+Reject patterns:
+
+- interface shape is invented for future use instead of real consumers;
+- business meaning crosses module boundaries as string/json/number/bool when a domain type or enum exists;
+- wire DTOs and domain types are conflated without an explicit mapper;
+- sync interfaces become async for style, or async I/O is hidden behind sync calls;
+- long-lived compatibility wrappers replace same-change migration or a dated delete path;
+- public errors collapse typed failure, degraded, timeout, and unavailable outcomes into strings or generic errors.
+
+## 17. Documentation Deliverables
+
+Purpose: make documentation freshness and ownership explicit.
+
+```text
+DocumentationDeliverable:
+  doc:
+  tier: live_source_of_truth|milestone_or_release_sync|archival
+  owner:
+  update_trigger:
+  code_paths_or_contracts:
+  required_sections:
+  freshness_check:
+  duplicate_source_to_delete:
+```
+
+Rules:
+
+- live source-of-truth docs change atomically with code when they describe current module responsibility, public API, contracts, commands, or safety rules;
+- longer-form design, tutorial, report, or milestone docs can sync later only when their stale window is explicit;
+- module/API docs should identify responsibility, public API, dependencies, modification risk, tests, and key decisions;
+- docs must not duplicate facts owned by code, generated contracts, or active instruction files.

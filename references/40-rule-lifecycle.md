@@ -72,8 +72,54 @@ Reject or rewrite a candidate when:
 ## Ratcheting And AI-Generated Code (2026)
 
 - **Ratchet = "don't make it worse".** A PR may not increase measured debt (violation count, uncovered lines, hotspot code-health drop) beyond the current baseline; legacy is grandfathered until touched. Prefer this over flat thresholds, which reward gaming and block useful deletes.
+- **Baseline = cleanup inventory, not approval.** A baseline or allowlist can make known debt visible and measurable, but it must not silently turn a detected violation into proof of acceptability. Separate design-scope exemptions (the rule truly does not apply) from cleanup debt (the rule applies and remains to fix).
 - **Turn decisions into fitness functions.** An ADR or architecture rule should be enforced, not merely documented: render it as a runnable check (a test, a static-analysis rule, an OPA policy) that fails the PR when violated. A doc claim is a hypothesis; a runnable check is evidence.
 - **Verification, not approval, for AI-generated code.** Human approval does not scale against AI-generated volume; the gate is that the change satisfies spec/tests/contracts/owners, not that a human rubber-stamped it. Code Health (complexity) can flag code too tangled for safe automated refactoring.
+
+## Module Readiness Lifecycle
+
+Use objective readiness states when a project has multiple modules, crates, packages, services, or ownership boundaries:
+
+```text
+ModuleReadinessState:
+  module:
+  owner:
+  status: not_ready|provisionally_ready|production_ready|stale
+  readiness_dimensions:
+  fitness_functions:
+  exceptions:
+  delete_or_review_by:
+  last_verified:
+```
+
+- `not_ready`: at least one required dimension is red or unowned.
+- `provisionally_ready`: gaps are known, owned, and dated.
+- `production_ready`: required dimensions are green and enforced by checks or accepted manual evidence.
+- `stale`: paths, commands, owners, or assumptions no longer match the repo.
+
+Refactor pressure should cite a violated readiness dimension, owner boundary, rule, or fitness function. If no rule covers the concern, record a candidate rule or missing fitness function instead of forcing subjective churn.
+
+## Baseline And Allowlist Semantics
+
+```text
+BaselineAudit:
+  baseline_file:
+  rule_or_check:
+  known_violations:
+  new_violations:
+  design_scope_exemptions:
+  cleanup_owner:
+  shrink_plan:
+  pass_fail_semantics:
+```
+
+Guidance:
+
+- design-scope exemptions live near the code or rule with a reason;
+- cleanup debt lives in a visible inventory with owner and review/delete path;
+- baseline updates should normally shrink the inventory or explicitly explain a profile change;
+- new violations should fail unless the project has deliberately chosen advisory-only discovery;
+- a green gate with hidden growing debt is stale evidence, not maturity.
 
 ## Continuous Update Loop
 

@@ -22,6 +22,10 @@ HarnessMatrix:
   integration:
   contract:
   static_architecture:
+  module_readiness:
+  fitness_registry:
+  interface_contract:
+  documentation_deliverables:
   code_cleanliness:
   policy_source_of_truth:
   failure_semantics:
@@ -58,7 +62,97 @@ Release-grade supply-chain tooling (2026): produce **Sigstore-signed build prove
 - raw JSON/primitive domain round-trip;
 - ABI/wire changes without compatibility tests;
 - stale path or command in rules;
+- unregistered or orphaned check scripts;
+- module declared stable without readiness evidence;
 - **ADR / decision drift** — an accepted architecture decision with no runnable check enforcing it (promote it to a fitness function that fails the PR when violated).
+
+## Module Readiness and Fitness Registry
+
+```text
+ModuleReadinessHarness:
+  module:
+  readiness_dimensions:
+    owner:
+    dependency_direction:
+    interface_boundary:
+    documentation:
+    tests:
+    error_or_panic_policy:
+    dead_code_or_wrapper_policy:
+    size_or_complexity:
+  checks:
+  exceptions:
+  delete_or_review_by:
+```
+
+```text
+FitnessRegistry:
+  checks:
+    - id:
+      dimension:
+      script_or_policy:
+      command:
+      gate:
+      scope:
+      owner:
+      baseline_or_ratchet:
+      pass_fail_semantics:
+  orphan_checks:
+  checks_to_delete:
+```
+
+Refactor requests should cite a violated readiness dimension, owner boundary, rule, or fitness function. If the project keeps baselines or allowlists, separate design-scope exemptions from cleanup debt. Known violations must remain visible with owner and deletion/review path; a baseline is not proof that the issue is acceptable.
+
+## Test Basis and Scenario Origin
+
+```text
+TestBasisHarness:
+  product_or_requirement_ref:
+  risk_or_regression:
+  level:
+  size:
+  runner:
+  scenario_origin: real_product|cli_equivalent|sensor_smoke|mock_contract
+  evidence_artifacts:
+  cleanup:
+  residual_risk:
+```
+
+Tests used in completion, closeout, product, or release claims need traceability to a requirement, risk, bug, or regression. Downgrade direct API shortcuts, synthetic events, low-level probes, and mocks when they bypass the product behavior being claimed.
+
+## Interface Contract Checks
+
+```text
+InterfaceContractHarness:
+  owner:
+  consumers:
+  public_surface:
+  typed_inputs:
+  typed_outcomes:
+  typed_errors:
+  wire_domain_mapper:
+  sync_async_boundary:
+  compatibility_or_delete_by:
+  contract_tests:
+```
+
+Check that public interfaces are shaped by real consumers, use typed domain boundaries, separate wire DTOs from domain types, and avoid long-lived compatibility wrappers.
+
+## Documentation Deliverable Checks
+
+```text
+DocumentationDeliverableHarness:
+  live_docs:
+  sync_later_docs:
+  required_sections:
+  public_api_index:
+  dependency_or_owner_index:
+  modification_risk:
+  tests_or_commands:
+  duplicate_sources:
+```
+
+Live source-of-truth docs should change atomically with code. Longer design/tutorial/report docs can sync later only when that stale window is explicit.
 
 ## Policy Source-of-Truth Checks
 
@@ -97,6 +191,7 @@ Additional checks:
 - hidden globals or shared mutable state that bypass constructor injection;
 - repeated argument clumps that need parameter objects;
 - test fixture duplication of business semantics instead of owner builders.
+- custom assertions or builders for repeated gate fixtures instead of copied parser/policy/normalizer logic.
 
 ## Failure Semantics Checks
 

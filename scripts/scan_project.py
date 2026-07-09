@@ -425,6 +425,25 @@ def main() -> int:
         )
         and any(tok in _BOUNDARY_TEST_TOKENS for tok in p.stem.lower().replace("-", "_").replace(".", "_").split("_"))
     )[:40]
+    fitness_samples = sorted(
+        rel(root, p)
+        for p in files
+        if (
+            p.name.startswith("check-")
+            or "fitness" in p.name.lower()
+            or p.name.lower() in {"architecture-rules.toml", "archunit.yml", "archunit.yaml"}
+        )
+    )[:60]
+    module_index_samples = sorted(
+        rel(root, p)
+        for p in files
+        if p.name == "INDEX.md" and p.parent != root
+    )[:60]
+    baseline_samples = sorted(
+        rel(root, p)
+        for p in files
+        if any(tok in p.name.lower() for tok in ("baseline", "allowlist", "allow-list", "exceptions"))
+    )[:40]
 
     ci_files = []
     workflows = root / ".github" / "workflows"
@@ -493,6 +512,9 @@ def main() -> int:
         "entry_samples": entry_samples,
         "boundary_samples": boundary_samples,
         "boundary_test_samples": boundary_test_samples,
+        "fitness_samples": fitness_samples,
+        "module_index_samples": module_index_samples,
+        "baseline_samples": baseline_samples,
         "cleanliness_signals": {
             "neutral": neutral_counts,
             "language_smells": lang_smell_counts,
@@ -508,7 +530,10 @@ def main() -> int:
             "Which existing instruction files (AGENTS.md / .claude|cursor|codex/rules / CONTRIBUTING) already state rules? Read them as authoritative and gap-fill, never duplicate.",
             "Which code paths are semantic owners, and which are only adapters?",
             "Which tests are PR gates vs product acceptance gates?",
+            "Which tests have explicit test basis, risk, size, runner, and scenario origin?",
             "Which release artifacts exist, and are they signed/verifiable (SLSA provenance)?",
+            "Which check scripts are registered as fitness functions with owner, gate, scope, and baseline semantics?",
+            "Which modules are production-ready, provisionally-ready, or not-ready by objective readiness criteria?",
             "Which completion claims require remote CI or manual runner evidence?",
             "Which policy/rule/default semantics have exactly one source of truth?",
             "Which layers fail open, fail closed, or degrade, and where is that visible?",

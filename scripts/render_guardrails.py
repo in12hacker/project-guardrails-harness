@@ -71,6 +71,9 @@ def candidate_rules(scan: dict) -> list[dict]:
     instr_paths = [f.get("path", "") for f in instr if f.get("path")]
     boundary = scan.get("boundary_samples", [])
     boundary_tests = scan.get("boundary_test_samples", [])
+    fitness = scan.get("fitness_samples", [])
+    module_indexes = scan.get("module_index_samples", [])
+    baselines = scan.get("baseline_samples", [])
     tests = scan.get("test_files_sample", [])
     readme = scan.get("readme_excerpt", "")
     ci = scan.get("ci_files", [])
@@ -111,10 +114,57 @@ def candidate_rules(scan: dict) -> list[dict]:
             "verification_gap": "map each Boundary Robustness Harness row to real tests, fuzz/property checks, or manual evidence",
         })
 
+    if fitness:
+        candidates.append({
+            "title": "Architecture checks need a fitness-function registry",
+            "family": "Module readiness / fitness functions",
+            "rule": "Every project-owned check script or architecture rule should be registered with its dimension, owner, gate level, scope, ratchet/baseline semantics, and command entry point; orphan checks should be wired into a gate or deleted.",
+            "evidence": fitness,
+            "confidence": "high",
+            "reject_if": "the script is one-off migration tooling or a developer exploration command that is intentionally not a gate",
+            "verification_gap": "create or update the project registry and prove each active check is invoked by a real command or CI job",
+        })
+
+    if module_indexes or fitness:
+        candidates.append({
+            "title": "Module readiness needs objective stop/refactor criteria",
+            "family": "Module readiness / architecture stability",
+            "rule": "A module should be declared stable only against explicit readiness dimensions such as single owner, dependency direction, typed interface boundary, documentation, tests, panic/error policy, dead-code/wrapper policy, and size/complexity gates. Reviewers should tie required refactors to a violated rule or fitness function.",
+            "evidence": module_indexes + fitness,
+            "confidence": "medium",
+            "reject_if": "the project has no module boundary concept or no maintainers willing to own readiness states",
+            "verification_gap": "define readiness states, allowed exceptions with review/delete dates, and the checks that prove each dimension",
+        })
+
+    if baselines or _target_contains(targets, ["baseline", "ratchet", "allow"]):
+        candidates.append({
+            "title": "Baselines must expose cleanup debt, not legalize violations",
+            "family": "Rule lifecycle / ratchet",
+            "rule": "Baseline or allowlist files should distinguish design-scope exemptions from cleanup debt. Known violations remain visible with owner and deletion path; updating a baseline should reduce or explain debt, not silently bless new violations.",
+            "evidence": baselines + _matching_values(targets, ["baseline", "ratchet", "allow"]),
+            "confidence": "medium",
+            "reject_if": "the file is a generated coverage/test fixture baseline unrelated to quality or architecture governance",
+            "verification_gap": "state the pass/fail behavior for known and new violations, and record how debt count is expected to shrink",
+        })
+
+    if tests:
+        candidates.append({
+            "title": "Gate tests need basis, risk, size, runner, and scenario origin",
+            "family": "Test and harness truthfulness",
+            "rule": "Tests used as gates should state the requirement, risk or regression they prove, test level/size, runner prerequisites, evidence artifacts, cleanup, residual risk, and whether the stimulus is real product, CLI-equivalent, sensor smoke, or mock/contract.",
+            "evidence": tests,
+            "confidence": "medium",
+            "reject_if": "the test is a small local helper not used for completion, product, closeout, or release claims",
+            "verification_gap": "add a TestGate or equivalent metadata block for gate-level tests and downgrade shortcuts to smoke/contract evidence",
+        })
+
     product_targets = _matching_values(targets, ["e2e", "product", "real", "stack", "live"])
+    readme_product_signal = _contains_any(readme, [
+        "agent", "user", "protect", "security", "gateway", "runtime", "local", "policy", "product", "app", "cli",
+    ])
     product_signals = (
-        _contains_any(readme, ["agent", "user", "protect", "security", "gateway", "runtime", "local", "policy"])
-        or bool(product_targets)
+        bool(product_targets)
+        or (readme_product_signal and bool(targets + tests))
     )
     if product_signals:
         candidates.append({
@@ -142,6 +192,42 @@ def candidate_rules(scan: dict) -> list[dict]:
             "confidence": "medium",
             "reject_if": "the changed path is purely internal and has no public or cross-process contract",
             "verification_gap": "identify the authoritative schema/proto/OpenAPI file or consumer compatibility gate",
+        })
+
+    interface_signals = module_indexes or evidence.get("openapi", []) or _matching_values(dep_names, [
+        "async-trait", "serde", "protobuf", "tonic", "grpc", "zod", "openapi",
+    ])
+    if interface_signals:
+        candidates.append({
+            "title": "Public interfaces need typed, consumer-driven contracts",
+            "family": "Interface / port contract",
+            "rule": "Public traits, ports, SDK/API contracts, and cross-module signatures should be shaped by real consumers, use typed inputs/outcomes/errors, separate wire DTOs from domain types, and avoid long-lived compatibility wrappers.",
+            "evidence": list(evidence.get("openapi", [])) + module_indexes + _matching_values(dep_names, ["async-trait", "serde", "protobuf", "tonic", "grpc", "zod", "openapi"]),
+            "confidence": "medium",
+            "reject_if": "the interface is private to one file or the project intentionally has no public/stable boundary",
+            "verification_gap": "document the interface contract, owner, consumer, evolution policy, and compatibility test",
+        })
+
+    if module_indexes or scan.get("docs_sample", []):
+        candidates.append({
+            "title": "Live documentation needs an owner and freshness tier",
+            "family": "Documentation deliverables",
+            "rule": "Documentation should distinguish live source-of-truth files that change atomically with code from longer-form docs updated at milestone/release sync. Module indexes should identify responsibility, public API, dependencies, risk, tests, and key decisions without duplicating code comments.",
+            "evidence": module_indexes + scan.get("docs_sample", []),
+            "confidence": "medium",
+            "reject_if": "the project is intentionally documentation-light and has no stable API/module surface",
+            "verification_gap": "define which docs are live, which are sync-later, and what template each module/API doc must satisfy",
+        })
+
+    if tests and scan.get("cleanliness_signals", {}).get("neutral", {}).get("mock_markers", 0):
+        candidates.append({
+            "title": "Test code must not copy production semantics",
+            "family": "Code cleanliness / test harness",
+            "rule": "Gate-level tests should use owner APIs, semantic builders, and custom assertions instead of duplicating production parsers, policy matchers, normalizers, or fixture logic that can drift into false green results.",
+            "evidence": tests,
+            "confidence": "medium",
+            "reject_if": "the duplicated data is a tiny literal fixture with no business or security semantics",
+            "verification_gap": "identify repeated fixtures/assertions and route them through owner builders or domain-specific assertions",
         })
 
     release_target_hits = _matching_values(targets, [
@@ -193,6 +279,9 @@ def sec_profile(scan: dict) -> str:
     targets = scan.get("build_targets", [])
     boundary = scan.get("boundary_samples", [])
     boundary_tests = scan.get("boundary_test_samples", [])
+    fitness = scan.get("fitness_samples", [])
+    module_indexes = scan.get("module_index_samples", [])
+    baselines = scan.get("baseline_samples", [])
     readme = scan.get("readme_excerpt", "")
     instr = scan.get("instruction_files", [])
     lines = [
@@ -226,6 +315,17 @@ def sec_profile(scan: dict) -> str:
             "|---|---|",
             f"| Boundary implementation candidates | {fmt_paths(boundary)} |",
             f"| Boundary test candidates | {fmt_paths(boundary_tests)} |",
+        ]
+    if fitness or module_indexes or baselines:
+        lines += [
+            "",
+            "## Governance maturity signals (review, do not assume)",
+            "",
+            "| Evidence | Sample |",
+            "|---|---|",
+            f"| Fitness/check scripts | {fmt_paths(fitness)} |",
+            f"| Module index docs | {fmt_paths(module_indexes)} |",
+            f"| Baseline / allowlist files | {fmt_paths(baselines)} |",
         ]
     if instr:
         lines += [
@@ -311,6 +411,9 @@ def sec_rules_hard() -> str:
         "| Evidence integrity (completion / mergeability / release claims) | _check existing_ | _?_ |",
         "| Product/profile fit (acceptance uses the real stimulus) | _check existing_ | _?_ |",
         "| Architecture & owner boundaries (no silent adapter-owners) | _check existing_ | _?_ |",
+        "| Module readiness / fitness functions (objective stability criteria) | _check existing_ | _?_ |",
+        "| Interface / port contract (typed, consumer-driven public boundary) | _check existing_ | _?_ |",
+        "| Documentation deliverables (live docs vs sync-later docs) | _check existing_ | _?_ |",
         "| Domain & parameter flow (no lossy type/name round-trips) | _check existing_ | _?_ |",
         "| Test truthfulness (mock/contract ≠ product acceptance) | _check existing_ | _?_ |",
         "| Policy source of truth (one owner, no parallel interpreters) | _check existing_ | _?_ |",
@@ -333,6 +436,8 @@ def sec_rules_advisory() -> str:
         "| Code cleanliness / state ownership | _?_ | _?_ |",
         "| Runtime / protocol integrity (kernel/device/proxy/stream) | _?_ | _?_ |",
         "| Operations / version / coverage truth | _?_ | _?_ |",
+        "| Fitness registry / orphan check cleanup | _?_ | _?_ |",
+        "| Baseline cleanup debt (known violations visible, shrinking) | _?_ | _?_ |",
         "| Rule lifecycle (status, owner, harness, review date) | _?_ | _?_ |",
     ])
 
@@ -428,6 +533,9 @@ def sec_harness(scan: dict) -> str:
     targets = scan.get("build_targets", [])
     boundary = scan.get("boundary_samples", [])
     boundary_tests = scan.get("boundary_test_samples", [])
+    fitness = scan.get("fitness_samples", [])
+    module_indexes = scan.get("module_index_samples", [])
+    baselines = scan.get("baseline_samples", [])
     lines = [
         "# Harness Matrix — map gates to the project's real commands",
         "",
@@ -438,7 +546,8 @@ def sec_harness(scan: dict) -> str:
     ]
     for g in ("Format", "Lint / static", "Unit", "Contract", "Security dependency",
               "Architecture drift", "Code cleanliness", "Policy source of truth",
-              "Failure semantics", "Secret lifecycle", "Runtime / protocol",
+              "Module readiness", "Fitness registry", "Interface contract",
+              "Documentation deliverables", "Failure semantics", "Secret lifecycle", "Runtime / protocol",
               "Boundary robustness", "Version / coverage", "Product acceptance", "Release"):
         lines.append(f"| {g} | TODO | _map from targets_ |")
     if targets:
@@ -450,6 +559,63 @@ def sec_harness(scan: dict) -> str:
             "",
             "_Prefer these over `infer from ecosystem`. If a gate has no target yet, that is a gap to create — record it, do not fake a command._",
         ]
+    lines += [
+        "",
+        "## Test Basis / Scenario Origin",
+        "",
+        "Use this for any test cited in completion, closeout, product, or release claims. Tests without a basis can still be useful, but they should not become gates until their risk and evidence are explicit.",
+        "",
+        "```text",
+        "TestGate:",
+        "  product_or_requirement_ref:",
+        "  risk_or_regression:",
+        "  level: unit|integration|contract|static|real_stack|product_acceptance|release",
+        "  size: small|medium|large|manual",
+        "  runner:",
+        "  scenario_origin: real_product|cli_equivalent|sensor_smoke|mock_contract",
+        "  positive_cases:",
+        "  negative_cases:",
+        "  evidence_artifacts:",
+        "  cleanup:",
+        "  residual_risk:",
+        "```",
+        "",
+        "Downgrade direct API calls, mock routes, synthetic events, and low-level sensor probes when they bypass the product path being claimed.",
+        "",
+        "## Module Readiness / Fitness Registry",
+        "",
+        "| Item | Project source | Status |",
+        "|---|---|---|",
+        f"| Fitness/check scripts registered with owner/gate/scope | {fmt_paths(fitness)} | TODO |",
+        f"| Module readiness docs or indexes reviewed | {fmt_paths(module_indexes)} | TODO |",
+        f"| Baseline/allowlist semantics audited | {fmt_paths(baselines)} | TODO |",
+        "",
+        "Readiness should be objective: owner, dependency direction, interface boundary, documentation, tests, error/panic policy, dead-code/wrapper policy, and size/complexity. Refactor requests should cite a violated rule or fitness function, not preference alone.",
+        "",
+        "Baseline/allowlist files should not silently turn detected debt into pass. Separate design-scope exemptions from cleanup debt; known violations need owner, review/delete path, and visible remaining count.",
+        "",
+        "## Interface Contract Harness",
+        "",
+        "Use this when changing public traits, ports, SDK/API contracts, cross-module signatures, or generated DTOs.",
+        "",
+        "```text",
+        "InterfaceContract:",
+        "  owner:",
+        "  consumers:",
+        "  methods_or_endpoints:",
+        "  typed_inputs:",
+        "  typed_outcomes:",
+        "  typed_errors:",
+        "  wire_domain_mapper:",
+        "  sync_async_boundary:",
+        "  compatibility_or_delete_by:",
+        "  contract_tests:",
+        "```",
+        "",
+        "## Documentation Deliverables",
+        "",
+        "Separate live source-of-truth docs that change atomically with code from longer-form docs updated at milestone/release sync. Module/API docs should name responsibility, public API, dependencies, modification risk, tests, and key decisions.",
+    ]
     lines += [
         "",
         "## Boundary Robustness Harness",
@@ -565,10 +731,13 @@ def sec_decisions(scan: dict) -> str:
         "",
         "1. Fill the owner map with code-path evidence.",
         "2. Validate or reject generated candidates in `rules/candidates.md`.",
-        "3. Downgrade impossible hard rules to advisory with target dates.",
-        "4. Add static scripts for the highest-risk drift patterns.",
-        "5. Run local gates, then check remote CI before any mergeability claim.",
-        "6. Move durable learned facts into `memory.md`; keep unresolved hypotheses here.",
+        "3. Register active check scripts as fitness functions, or delete/orphan-label them.",
+        "4. Audit baseline/allowlist files: design exemption or cleanup debt?",
+        "5. Define module readiness only where the project has real module ownership boundaries.",
+        "6. Downgrade impossible hard rules to advisory with target dates.",
+        "7. Add static scripts for the highest-risk drift patterns.",
+        "8. Run local gates, then check remote CI before any mergeability claim.",
+        "9. Move durable learned facts into `memory.md`; keep unresolved hypotheses here.",
         "",
         "## Sources",
         "",
@@ -636,6 +805,10 @@ def build_index(scan: dict) -> str:
         "- **Evidence over claims** — no completion / mergeable / release-ready claim without code path + commit + CI/manual evidence.",
         "- **Ingest, don't overwrite** — if the project already states a rule, link it; never duplicate a fact that lives elsewhere.",
         "- **Candidate rules need validation** — generated project rules stay drafts until owner, reject condition, and runnable check are confirmed.",
+        "- **Gate tests need basis/origin** — a gate test needs risk, level/size, runner, evidence, cleanup, and real vs shortcut stimulus classification.",
+        "- **Fitness functions need ownership** — active check scripts should be registered, owned, invoked by real gates, or deleted.",
+        "- **Baselines are not approval** — known violations remain cleanup debt unless they are true design-scope exemptions.",
+        "- **Readiness beats preference** — force refactors by citing violated readiness criteria, rules, or fitness functions.",
         "- **Test truthfulness** — mock/contract tests ≠ product acceptance (unless contract-only product).",
         "- **Boundary robustness** — weak hints, malformed input, isolation, false positives/negatives, and pre-effect timing need explicit tests.",
         "- **Supply-chain honesty** — release-grade needs SBOM + signed provenance (SLSA L2/L3) + verify-at-deploy.",

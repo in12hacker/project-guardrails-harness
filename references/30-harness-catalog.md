@@ -66,6 +66,22 @@ Release-grade supply-chain tooling (2026): produce **Sigstore-signed build prove
 - module declared stable without readiness evidence;
 - **ADR / decision drift** — an accepted architecture decision with no runnable check enforcing it (promote it to a fitness function that fails the PR when violated).
 
+## Declarative Rule Engine (Three-Layer Fitness Architecture)
+
+When a project accumulates many per-milestone or per-concern check scripts, consolidate them into a **declarative rule engine** rather than writing N scripts. Pattern observed in AgentShield:
+
+| Layer | Tool | Scope | Gate? |
+|-------|------|-------|-------|
+| 1. Generic quality | clippy restriction lints (`workspace.lints`) | unwrap/panic/dbg/print (stable, zero-cost) | yes (compiler deny) |
+| 2. Semantic invariants | declarative TOML rules + single generic engine | sole_producer / no_pattern / invariant_lock / location / forbidden_edge | yes (CI) |
+| 3. Structure exploration | cargo-modules / cargo-depgraph | module tree visualization | no (diagnostic) |
+
+Key principles:
+- **Layer 1 first**: if clippy or a native lint covers it, do not write a custom script.
+- **Layer 2 for project-specific semantics**: rules live in a TOML/YAML data file; a single generic engine executes them. Adding a new invariant = adding a data block, not writing a new script.
+- **Layer 3 is never a gate**: exploration tools have false positives (e.g., cargo-modules `--acyclic` false-positives on inherent impls); use them for developer insight only.
+- **Occam's razor**: before creating a new check script, verify no existing tool (clippy, cargo-deny, cargo-audit, readelf, curl) already covers the need.
+
 ## Module Readiness and Fitness Registry
 
 ```text

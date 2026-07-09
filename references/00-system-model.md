@@ -86,7 +86,7 @@ A rule without a verification path is advisory. Hard gates require reliable auto
 3. **Do not let adapters become owners.** Routes/controllers/UI/daemon scripts are usually adapters, not semantic owners.
 4. **Do not collapse acceptance levels.** Unit, mock, contract, real-stack, product acceptance, and release evidence prove different things.
 5. **Do not overclaim supply-chain maturity.** A dependency scan is not provenance, and produced provenance is not assurance unless it is verified at deploy (SLSA Build L2/L3 + Sigstore + Trusted Publishing).
-6. **Do not add abstractions without deletion.** Abstractions should remove duplication, drift, or platform coupling.
+6. **Do not add abstractions without deletion (Occam's razor).** Abstractions should remove duplication, drift, or platform coupling. Prefer zero-dependency solutions when a native tool (curl/readelf/clippy) already covers the need. Every new script, file, or tool must justify its existence over reusing what is already present.
 7. **Do not store stale rules.** Rules need owners, status, review dates, and deletion/supersession paths.
 8. **Do not turn fallback into silence.** Fail-open/fail-closed is a layer decision with typed degraded evidence.
 9. **Do not persist plaintext secrets.** Secret rules must describe the full lifecycle from source to runtime use to deletion.

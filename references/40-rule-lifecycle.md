@@ -72,7 +72,7 @@ Reject or rewrite a candidate when:
 ## Ratcheting And AI-Generated Code (2026)
 
 - **Ratchet = "don't make it worse".** A PR may not increase measured debt (violation count, uncovered lines, hotspot code-health drop) beyond the current baseline; legacy is grandfathered until touched. Prefer this over flat thresholds, which reward gaming and block useful deletes.
-- **Baseline = cleanup inventory, not approval.** A baseline or allowlist can make known debt visible and measurable, but it must not silently turn a detected violation into proof of acceptability. Separate design-scope exemptions (the rule truly does not apply) from cleanup debt (the rule applies and remains to fix).
+- **Baseline = cleanup inventory, not approval (mandatory).** A baseline or allowlist must make known debt visible and measurable. It must NOT turn a detected violation into proof of acceptability. Any violation (baselined or new) must FAIL the gate; the baseline only classifies known vs new for reporting clarity. The only way to PASS is to actually fix violations. Separate design-scope exemptions (the rule truly does not apply, declared in code with a reason) from cleanup debt (the rule applies and must be fixed).
 - **Turn decisions into fitness functions.** An ADR or architecture rule should be enforced, not merely documented: render it as a runnable check (a test, a static-analysis rule, an OPA policy) that fails the PR when violated. A doc claim is a hypothesis; a runnable check is evidence.
 - **Verification, not approval, for AI-generated code.** Human approval does not scale against AI-generated volume; the gate is that the change satisfies spec/tests/contracts/owners, not that a human rubber-stamped it. Code Health (complexity) can flag code too tangled for safe automated refactoring.
 
@@ -118,8 +118,9 @@ Guidance:
 - design-scope exemptions live near the code or rule with a reason;
 - cleanup debt lives in a visible inventory with owner and review/delete path;
 - baseline updates should normally shrink the inventory or explicitly explain a profile change;
-- new violations should fail unless the project has deliberately chosen advisory-only discovery;
-- a green gate with hidden growing debt is stale evidence, not maturity.
+- new violations must fail; baselined (known) violations must also fail (the baseline is a todo list, not permission);
+- a green gate with hidden growing debt is stale evidence, not maturity;
+- during transition (debt not yet cleared), known violations may be marked `advisory` (CI warn, not block) while new violations block; once the baseline clears, switch to `hard_gate` (all violations block).
 
 ## Continuous Update Loop
 

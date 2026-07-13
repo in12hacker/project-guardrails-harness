@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "controls": [
+    {
+      "id": "QF.FRAMEWORK.MANIFEST",
+      "title": "Quality profile decisions are complete",
+      "dimension": "framework_governance",
+      "source_standard": "project-guardrails-harness",
+      "source_version": "1.0",
+      "project_requirement": "The project quality profile, scope, market, maturity target, and authority boundary are explicit.",
+      "requirement_ids": ["REQ.QF.FRAMEWORK.MANIFEST"],
+      "risk": "Quality claims could be generated against an inferred or incomplete scope.",
+      "risk_ids": ["RISK.QF.FRAMEWORK.MANIFEST"],
+      "verification_ids": ["VERIFY.QF.FRAMEWORK.MANIFEST"],
+      "owner": "quality",
+      "applies": true,
+      "applicability_rationale": "Universal framework self-governance control.",
+      "required_from_maturity": "prototype",
+      "scope": [".guardrails/quality-manifest.yaml"],
+      "execution": {
+        "type": "file_exists",
+        "path": ".guardrails/quality-manifest.yaml",
+        "authorization_required": false
+      },
+      "evidence_required": ["current manifest file"]
+    }
+  ]
+}

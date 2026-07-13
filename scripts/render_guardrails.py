@@ -56,6 +56,15 @@ def _evidence_cell(values: list[str], limit: int = 4) -> str:
     return fmt_paths(values, limit) if values else "scan signal only; validate manually"
 
 
+def fmt_commands(items: list[dict], limit: int = 4) -> str:
+    commands: list[str] = []
+    for item in items[:limit]:
+        argv = item.get("command", [])
+        if isinstance(argv, list) and argv:
+            commands.append(f"`{' '.join(str(part) for part in argv)}`")
+    return ", ".join(commands) if commands else "_no mapped command_"
+
+
 def candidate_rules(scan: dict) -> list[dict]:
     """Infer project-local rule drafts from scan evidence.
 
@@ -72,6 +81,7 @@ def candidate_rules(scan: dict) -> list[dict]:
     boundary = scan.get("boundary_samples", [])
     boundary_tests = scan.get("boundary_test_samples", [])
     fitness = scan.get("fitness_samples", [])
+    fitness_registry = scan.get("fitness_registry", [])
     module_indexes = scan.get("module_index_samples", [])
     baselines = scan.get("baseline_samples", [])
     tests = scan.get("test_files_sample", [])
@@ -114,12 +124,13 @@ def candidate_rules(scan: dict) -> list[dict]:
             "verification_gap": "map each Boundary Robustness Harness row to real tests, fuzz/property checks, or manual evidence",
         })
 
-    if fitness:
+    if fitness or fitness_registry:
+        fitness_evidence = [entry.get("script", "") for entry in fitness_registry if entry.get("script")] + fitness
         candidates.append({
             "title": "Architecture checks need a fitness-function registry",
             "family": "Module readiness / fitness functions",
             "rule": "Every project-owned check script or architecture rule should be registered with its dimension, owner, gate level, scope, ratchet/baseline semantics, and command entry point; orphan checks should be wired into a gate or deleted.",
-            "evidence": fitness,
+            "evidence": fitness_evidence,
             "confidence": "high",
             "reject_if": "the script is one-off migration tooling or a developer exploration command that is intentionally not a gate",
             "verification_gap": "create or update the project registry and prove each active check is invoked by a real command or CI job",
@@ -282,6 +293,10 @@ def sec_profile(scan: dict) -> str:
     fitness = scan.get("fitness_samples", [])
     module_indexes = scan.get("module_index_samples", [])
     baselines = scan.get("baseline_samples", [])
+    gate_inventory = scan.get("gate_inventory", [])
+    package_scripts = scan.get("package_scripts", [])
+    ci_commands = scan.get("ci_commands", [])
+    fitness_registry = scan.get("fitness_registry", [])
     readme = scan.get("readme_excerpt", "")
     instr = scan.get("instruction_files", [])
     lines = [
@@ -304,6 +319,40 @@ def sec_profile(scan: dict) -> str:
             lines.append(f"- **{k}**: {', '.join(f'`{d}`' for d in v)}")
     if targets:
         lines += ["", "## Build / task targets (real commands)", "", f"`{'`, `'.join(targets)}`"]
+    if gate_inventory:
+        lines += [
+            "",
+            "## Detected gate entry points (unverified)",
+            "",
+            "| Target | Categories | Invocation | Source |",
+            "|---|---|---|---|",
+        ]
+        for item in gate_inventory[:40]:
+            lines.append(
+                f"| `{item['name']}` | {', '.join(item.get('categories', []))} | "
+                f"`{' '.join(item.get('command', []))}` | `{item.get('source', '')}` |"
+            )
+    if fitness_registry:
+        lines += [
+            "",
+            f"## Fitness registry ({len(fitness_registry)} structured entries)",
+            "",
+            "| ID | Dimension | Gate | Script |",
+            "|---|---|---|---|",
+        ]
+        for entry in fitness_registry[:40]:
+            lines.append(
+                f"| `{entry['id']}` | {entry['dimension']} | `{entry['gate']}` | `{entry['script']}` |"
+            )
+    if package_scripts:
+        lines += ["", "## Package scripts", "", "| Package | Script | Invocation |", "|---|---|---|"]
+        for item in package_scripts[:30]:
+            lines.append(f"| `{item['package']}` | `{item['name']}` | `{' '.join(item['invocation'])}` |")
+    if ci_commands:
+        lines += [
+            "", "## CI command evidence", "",
+            f"{len(ci_commands)} `run`/`uses` entries detected. Review workflow/job semantics before treating them as gates.",
+        ]
     if boundary or boundary_tests:
         lines += [
             "",
@@ -350,12 +399,14 @@ def sec_profile(scan: dict) -> str:
 
 def sec_owners(scan: dict) -> str:
     evidence = scan.get("evidence", {})
-    language_samples = scan.get("language_file_samples", {})
-    source_samples = [
-        path
-        for lang in sorted(language_samples)
-        for path in language_samples.get(lang, [])[:3]
-    ][:10]
+    source_samples = scan.get("production_source_samples", [])[:12]
+    if not source_samples:
+        language_samples = scan.get("language_file_samples", {})
+        source_samples = [
+            path
+            for lang in sorted(language_samples)
+            for path in language_samples.get(lang, [])[:3]
+        ][:10]
     test_samples = scan.get("test_files_sample", [])[:10]
     docs = scan.get("docs_sample", [])[:10]
     ci = scan.get("ci_files", [])[:10]
@@ -531,9 +582,11 @@ def sec_cleanliness(scan: dict) -> str:
 
 def sec_harness(scan: dict) -> str:
     targets = scan.get("build_targets", [])
+    gate_inventory = scan.get("gate_inventory", [])
     boundary = scan.get("boundary_samples", [])
     boundary_tests = scan.get("boundary_test_samples", [])
     fitness = scan.get("fitness_samples", [])
+    fitness_registry = scan.get("fitness_registry", [])
     module_indexes = scan.get("module_index_samples", [])
     baselines = scan.get("baseline_samples", [])
     lines = [
@@ -544,12 +597,33 @@ def sec_harness(scan: dict) -> str:
         "| Gate | Status | Real command (from the project) |",
         "|---|---|---|",
     ]
-    for g in ("Format", "Lint / static", "Unit", "Contract", "Security dependency",
-              "Architecture drift", "Code cleanliness", "Policy source of truth",
-              "Module readiness", "Fitness registry", "Interface contract",
-              "Documentation deliverables", "Failure semantics", "Secret lifecycle", "Runtime / protocol",
-              "Boundary robustness", "Version / coverage", "Product acceptance", "Release"):
-        lines.append(f"| {g} | TODO | _map from targets_ |")
+    gate_rows = (
+        ("Format", {"format"}),
+        ("Lint / static", {"lint_static"}),
+        ("Unit / integration", {"unit_integration"}),
+        ("Contract", {"contract"}),
+        ("Security", {"security"}),
+        ("Architecture drift", {"architecture"}),
+        ("Code cleanliness", {"architecture", "lint_static"}),
+        ("Policy source of truth", {"architecture"}),
+        ("Module readiness", {"architecture"}),
+        ("Fitness registry", {"architecture"}),
+        ("Interface contract", {"contract", "architecture"}),
+        ("Documentation deliverables", {"architecture"}),
+        ("Failure semantics", {"unit_integration", "product_acceptance"}),
+        ("Secret lifecycle", {"security"}),
+        ("Runtime / protocol", {"operations", "product_acceptance"}),
+        ("Boundary robustness", {"architecture", "product_acceptance"}),
+        ("Version / coverage", {"coverage", "release"}),
+        ("Product acceptance", {"product_acceptance"}),
+        ("Release", {"release"}),
+    )
+    for label, categories in gate_rows:
+        matches = [item for item in gate_inventory if categories.intersection(item.get("categories", []))]
+        if matches:
+            lines.append(f"| {label} | DETECTED_UNVERIFIED | {fmt_commands(matches)} |")
+        else:
+            lines.append(f"| {label} | TODO | _no repository-owned command detected_ |")
     if targets:
         lines += [
             "",
@@ -586,7 +660,7 @@ def sec_harness(scan: dict) -> str:
         "",
         "| Item | Project source | Status |",
         "|---|---|---|",
-        f"| Fitness/check scripts registered with owner/gate/scope | {fmt_paths(fitness)} | TODO |",
+        f"| Fitness/check scripts registered with owner/gate/scope | {fmt_paths([entry.get('script', '') for entry in fitness_registry] or fitness)} | {'DETECTED_UNVERIFIED' if fitness_registry else 'TODO'} |",
         f"| Module readiness docs or indexes reviewed | {fmt_paths(module_indexes)} | TODO |",
         f"| Baseline/allowlist semantics audited | {fmt_paths(baselines)} | TODO |",
         "",
@@ -650,14 +724,15 @@ def sec_supply_chain() -> str:
     return "\n".join([
         "# Supply-Chain & Release Gates (draft)",
         "",
-        "Calibrate against **SLSA v1.0 Build Track** (L1 provenance exists · L2 signed provenance from a hosted builder · L3 hardened/isolated builder). Provenance is worthless unless **verified at deploy** — producing it is not assurance.",
+        "Calibrate against the approved **SLSA v1.2 Build and Source Tracks**. Provenance is worthless unless **verified at consumption/deploy** — producing it is not assurance.",
         "",
         "| Claim level | What it proves | What it does NOT |",
         "|---|---|---|",
         "| `dependency_scan_present` | no known CVE in the declared graph at scan time | trustworthiness, unknown vulns, transitive pinning |",
         "| `ci_supply_chain_gate_passed` | incoming dependencies scored | artifact trust |",
         "| `artifact_verifiable` | signed artifact + SBOM | build-path integrity |",
-        "| `provenance_verified_at_deploy` | SLSA L2/L3 provenance AND verified at deploy | absence of logic bugs |",
+        "| `provenance_verified_at_deploy` | versioned SLSA Build provenance verified at deploy | absence of logic bugs |",
+        "| `source_controls_verified` | versioned SLSA Source controls/attestations | build-system integrity |",
         "| `release_grade_supply_chain_assurance` | the full ladder above | — |",
         "",
         "**Produce:** Sigstore-signed build provenance (`gh attestation build`, npm `--provenance`, `cosign sign`).  ",

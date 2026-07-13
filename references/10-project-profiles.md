@@ -2,11 +2,22 @@
 
 Use this reference to classify a repository before writing rules.
 
+## Contents
+
+Profile Record; Development Modes; Assurance Responsibility; Project Types;
+Profile Overlays; Product Paradigm Fit; Criticality; Classification Warnings.
+
 ## Profile Record
 
 ```text
 ProjectProfile:
   project_type:
+  development_mode:                # ai_greenfield | ai_brownfield | human_greenfield | human_brownfield
+  distribution_model:              # open_source | private_commercial | saas | client_software | embedded
+  target_market:                    # explicit; never inferred
+  target_maturity:                  # prototype through regulated_ready
+  assessed_scope:                   # whole_project or named subproject/path set
+  ai_system:                        # true enables AI assurance overlay
   primary_users:
   runtime:
   criticality:
@@ -18,6 +29,35 @@ ProjectProfile:
   acceptance_surface:
   ownership_model:                 # strong | weak | collective; team/domain-aligned CODEOWNERS (not folder-aligned)
 ```
+
+Every field above is an explicit project decision. Repository scanning can
+propose evidence, but it cannot choose market, legal applicability, maturity,
+or assessment scope.
+
+## Development Modes
+
+| Mode | Adoption policy | Claim boundary |
+|---|---|---|
+| AI greenfield | create the recommended skeleton before feature work | applicable task and project controls must pass |
+| AI brownfield | run one planned quality-convergence campaign in reviewable phases | no whole-project readiness until debt is cleared |
+| Human greenfield | scaffold early; allow owner-led sequencing | applicable controls still determine claims |
+| Human brownfield | migrate progressively while allowing scoped feature work | task may complete when scoped controls pass and debt does not grow; global readiness remains failed |
+
+Scope is a separate axis. Any mode can assess a named subproject, but that
+assessment never claims readiness for the containing product.
+
+Known debt is never converted to `PASS`. Continued feature development in a
+human brownfield project is a scope decision, not a waiver of project quality.
+
+## Assurance Responsibility
+
+- Open source: an independent quality agent performs cross-audit and a project
+  owner acts as release authority; no fictitious external quality organization
+  is required.
+- Commercial: identify product, engineering, security/privacy, operations, and
+  release authorities. A solo project may map these to a virtual team while
+  preserving separate audit contexts.
+- Regulated: add the explicitly required independent or third-party assurance.
 
 ## Project Types
 

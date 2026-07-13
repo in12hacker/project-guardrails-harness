@@ -2,6 +2,14 @@
 
 Harnesses prove guardrails. A rule without a harness is advisory until a reliable automated check or manual signoff path exists.
 
+## Contents
+
+Gate Levels; Harness Matrix; Ecosystem Hints; Architecture and Fitness Checks;
+Test/Contract/Documentation Checks; Policy/Cleanliness/Failure/Secret Checks;
+Runtime and Boundary Robustness; Version/Coverage/Product Acceptance;
+Runner and Performance Policy; Control Evidence; Claims; Production and
+Commercial Harnesses.
+
 ## Gate Levels
 
 | Gate | Purpose | Typical examples |
@@ -9,6 +17,8 @@ Harnesses prove guardrails. A rule without a harness is advisory until a reliabl
 | PR Gate | fast feedback and new-regression prevention | format, lint, typecheck, unit, small integration, contract |
 | Closeout Gate | milestone signoff | coverage, e2e, root/device/cloud runner, deferred audit |
 | Product Acceptance Gate | proves user/business/security behavior | real user workflow, agent scenario, device flow, enforcement/degraded path |
+| Production Readiness Gate | proves operability and recovery | SLO, capacity, alert, restore, rollback, incident exercise |
+| Commercial Delivery Gate | proves distributability and supportability | UX/a11y/i18n, install lifecycle, notices, support and release authority |
 | Release Gate | proves artifact integrity | clean build, SBOM, provenance, signing, install/upgrade/rollback |
 
 ## Harness Matrix
@@ -38,6 +48,11 @@ HarnessMatrix:
   performance:
   e2e:
   product_acceptance:
+  requirement_traceability:
+  production_readiness:
+  commercial_delivery:
+  ai_assurance:
+  audit_independence:
   release:
 ```
 
@@ -332,3 +347,55 @@ Wall-time-only benchmark output is a signal, not always a hard gate. Hot-path ru
 - complexity-specific test fixtures;
 - benchmark threshold with stable baseline;
 - trace evidence for real runtime paths.
+
+## Control Execution And Evidence
+
+Every gate maps to one or more controls in `control-registry.yaml`. A control
+execution must record:
+
+```text
+ControlRun:
+  control_id:
+  commit_and_scope:
+  command_or_manual_procedure:
+  environment_and_tool_versions:
+  started_at_and_duration:
+  exit_status_and_result:
+  output_digest_and_artifacts:
+  actor_and_audit_stage:
+  freshness_or_expiry:
+```
+
+Commands are argv arrays owned by the project. Missing root, device, cloud,
+secret, paid, remote, production, dependency-install, or privileged access is
+`BLOCKED` pending separate authorization; it is never silently attempted or
+reported as PASS.
+
+## Claim Gate
+
+The claim gate is independent from individual test commands. It checks that:
+
+- every applicable control for the requested task, maturity, scope, and market
+  is current `PASS` on the assessed commit;
+- required self, cross, release-authority, and third-party audit stages have
+  passed independently;
+- traceability has no broken or orphaned required links;
+- the evidence ledger has no contradictory current result;
+- a subproject assessment is not presented as whole-product assurance.
+
+Human brownfield policy may permit feature development when all affected
+task-scoped controls pass and debt does not increase. The global debt control
+stays failed, so production/commercial readiness claims remain blocked.
+
+## Production And Commercial Harnesses
+
+Production evidence includes executed capacity/load tests, SLO calculations,
+alert delivery and response, backup restore, rollback, incident exercises,
+security response, and DORA trend collection. Commercial evidence includes real
+user journeys, WCAG-targeted accessibility testing, locale/fallback behavior,
+install/upgrade/rollback/uninstall, licensing/notices, support lifecycle, and
+artifact verification.
+
+Use real environments where the risk requires them. Synthetic, mock, or
+document-only evidence must identify the residual gap and cannot satisfy a
+control that explicitly requires product or production execution.

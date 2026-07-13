@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "name": "REQUIRED",
+    "root": ".",
+    "development_mode": "REQUIRED",
+    "target_maturity": "REQUIRED"
+  },
+  "profile": {
+    "product_types": ["REQUIRED"],
+    "distribution_model": "REQUIRED",
+    "target_markets": ["REQUIRED"],
+    "criticality": "REQUIRED",
+    "data_sensitivity": "REQUIRED",
+    "deployment_models": ["REQUIRED"],
+    "support_model": "REQUIRED",
+    "primary_users": ["REQUIRED"],
+    "ai_system": false,
+    "legal_profiles": ["REQUIRED"],
+    "quality_dimensions": [
+      "functional_suitability",
+      "performance_efficiency",
+      "compatibility",
+      "interaction_capability",
+      "reliability",
+      "security",
+      "maintainability",
+      "flexibility",
+      "safety"
+    ]
+  },
+  "scope": {
+    "mode": "full_repo",
+    "included_paths": ["."],
+    "excluded_paths": [],
+    "unassessed_dependencies": [],
+    "overall_project_claim_allowed": true
+  },
+  "authority": {
+    "local_unprivileged_controls": true,
+    "separate_authorization_required": [
+      "dependency_install",
+      "paid_service",
+      "secrets",
+      "remote_mutation",
+      "production_mutation",
+      "privileged_execution"
+    ]
+  },
+  "audit_policy": {
+    "required_stages": ["self", "cross", "release_authority"],
+    "independent_actors": true
+  }
+}

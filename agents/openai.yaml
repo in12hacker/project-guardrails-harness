@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Quality Guardrails"
+  short_description: "Execute and enforce project delivery quality"
+  default_prompt: "Use $project-guardrails-harness to initialize, execute, and audit this project quality framework."

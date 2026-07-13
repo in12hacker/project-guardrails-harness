@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -43,6 +44,9 @@ IGNORE_DIRS = {
     "playwright-report",
     "test-results",
     "logs",
+    ".runtime",
+    ".cache",
+    "artifacts",
 }
 
 LANG_EXTS = {
@@ -63,11 +67,18 @@ MARKERS = {
     "python": ["pyproject.toml", "requirements.txt", "poetry.lock", "uv.lock"],
     "go": ["go.mod"],
     "java": ["pom.xml", "build.gradle", "build.gradle.kts"],
+    "gradle_wrapper": ["gradlew"],
+    "maven_wrapper": ["mvnw"],
+    "cmake": ["CMakeLists.txt"],
     "docker": ["Dockerfile", "docker-compose.yml", "compose.yml"],
     "kubernetes": ["Chart.yaml", "kustomization.yaml"],
     "openapi": ["openapi.yaml", "openapi.yml", "swagger.yaml"],
     "security": ["SECURITY.md", "deny.toml", ".github/dependabot.yml", "CODEOWNERS"],
     "release": ["Makefile", "justfile", ".goreleaser.yml", "release.yml"],
+    "governance": ["LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CODEOWNERS", "GOVERNANCE.md"],
+    "operations": ["RUNBOOK.md", "OPERATIONS.md", "SLO.md", "SUPPORT.md"],
+    "accessibility": ["ACCESSIBILITY.md", "VPAT.md"],
+    "ai_assurance": ["MODEL_CARD.md", "AI_RISK.md", "EVALS.md"],
     "guardrails": [
         ".guardrails/INDEX.md",
         ".guardrails/memory.md",
@@ -293,9 +304,9 @@ def manifest_deps(root: Path) -> dict[str, list[str]]:
     return deps
 
 
-def build_targets(root: Path) -> list[str]:
-    """Makefile/justfile target names, so the model maps gates to real commands
-    instead of the generic 'infer from ecosystem'."""
+def build_target_details(root: Path) -> list[dict]:
+    """Makefile/justfile targets with their actual invocation."""
+    details: list[dict] = []
     for name in ("Makefile", "makefile", "GNUmakefile", "justfile", "Justfile"):
         p = root / name
         if not p.is_file():
@@ -303,19 +314,137 @@ def build_targets(root: Path) -> list[str]:
         try:
             text = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
-            return []
-        targets: list[str] = []
+            continue
         for ln in text.splitlines():
             if ln.startswith(("\t", " ", "#")):
                 continue
             head = ln.split("#", 1)[0].strip()
             if ":" not in head or "=" in head or head.startswith(("if", "for", "while", "!")):
                 continue
-            tgt = head.split(":", 1)[0].strip()
-            if tgt and not tgt.startswith((".", "$", "%")):
-                targets.append(tgt)
-        return sorted(set(targets))[:40]
-    return []
+            target_head = head.split(":", 1)[0].strip()
+            if name.lower() == "justfile":
+                targets = target_head.split()[:1]
+            else:
+                targets = target_head.split()
+            for tgt in targets:
+                if tgt and not tgt.startswith((".", "$", "%")):
+                    command = ["just", tgt] if name.lower() == "justfile" else ["make", tgt]
+                    details.append({"name": tgt, "source": name, "command": command})
+    unique: dict[tuple[str, str], dict] = {}
+    for item in details:
+        unique[(item["source"], item["name"])] = item
+    return sorted(unique.values(), key=lambda item: (item["source"], item["name"]))[:160]
+
+
+def build_targets(root: Path) -> list[str]:
+    return sorted({item["name"] for item in build_target_details(root)})[:160]
+
+
+GATE_TARGET_PATTERNS = {
+    "format": ("fmt", "format"),
+    "lint_static": ("lint", "clippy", "static", "typecheck"),
+    "unit_integration": ("test", "unit", "integration"),
+    "contract": ("contract", "schema", "openapi", "api"),
+    "architecture": ("fitness", "architecture", "quality", "boundary"),
+    "coverage": ("coverage", "cov"),
+    "security": ("sast", "dast", "security", "audit", "deny", "secret", "vuln"),
+    "product_acceptance": ("e2e", "product", "real-stack", "real_stack", "acceptance", "live"),
+    "release": ("release", "supply", "sbom", "provenance", "attestation", "reproducible", "sign-artifact"),
+    "operations": ("slo", "load", "capacity", "smoke", "deploy", "rollback", "restore"),
+}
+
+
+def gate_inventory(target_details: list[dict]) -> list[dict]:
+    inventory: list[dict] = []
+    for item in target_details:
+        lowered = item["name"].lower()
+        categories = [
+            category for category, patterns in GATE_TARGET_PATTERNS.items()
+            if any(pattern in lowered for pattern in patterns)
+        ]
+        if categories:
+            inventory.append({**item, "categories": categories, "status": "detected_unverified"})
+    return inventory
+
+
+def collect_package_scripts(root: Path) -> list[dict]:
+    scripts: list[dict] = []
+    for path in sorted(root.rglob("package.json")):
+        if any(part in IGNORE_DIRS for part in path.parts):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        block = data.get("scripts", {})
+        if not isinstance(block, dict):
+            continue
+        package_dir = path.parent.relative_to(root).as_posix()
+        for name, command in sorted(block.items()):
+            scripts.append({
+                "package": package_dir or ".",
+                "name": name,
+                "command": str(command),
+                "invocation": ["npm", "run", name],
+            })
+    return scripts[:120]
+
+
+def collect_ci_commands(root: Path) -> list[dict]:
+    commands: list[dict] = []
+    workflow_dir = root / ".github" / "workflows"
+    if not workflow_dir.is_dir():
+        return commands
+    for path in sorted(workflow_dir.glob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        current_job = "unknown"
+        in_jobs = False
+        for line in lines:
+            if re.match(r"^jobs:\s*$", line):
+                in_jobs = True
+                continue
+            job_match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line) if in_jobs else None
+            if job_match:
+                current_job = job_match.group(1)
+            run_match = re.match(r"^\s+-?\s*run:\s*(.+)$", line)
+            uses_match = re.match(r"^\s+-?\s*uses:\s*(.+)$", line)
+            if run_match:
+                commands.append({"workflow": rel(root, path), "job": current_job, "type": "run", "value": run_match.group(1).strip()})
+            elif uses_match:
+                commands.append({"workflow": rel(root, path), "job": current_job, "type": "uses", "value": uses_match.group(1).strip()})
+    return commands[:240]
+
+
+def collect_fitness_registry(root: Path) -> list[dict]:
+    """Read the common pipe-delimited shell registry shape when present."""
+    runner = root / "scripts" / "fitness-runner.sh"
+    if not runner.is_file():
+        return []
+    try:
+        text = runner.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    entries: list[dict] = []
+    pattern = re.compile(
+        r'^\s*"([^|"\n]+)\|([^|"\n]+)\|([^|"\n]+)\|([^|"\n]+)\|([^|"\n]+)\|([^"\n]+)"\s*$',
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(text):
+        ff_id, dimension, script, gate, skippable, description = match.groups()
+        entries.append({
+            "id": ff_id,
+            "dimension": dimension,
+            "script": f"scripts/{script}",
+            "gate": gate,
+            "skippable": skippable == "1",
+            "description": description,
+        })
+    return entries[:240]
 
 
 def iter_files(root: Path) -> Iterable[Path]:
@@ -397,13 +526,23 @@ def main() -> int:
         if p.suffix.lower() in {".md", ".rst", ".adoc"}
     ][:80]
 
+    production_source_samples = sorted(
+        rel(root, p)
+        for p in files
+        if p.suffix.lower() in SOURCE_EXTS
+        and not any(part.lower() in TEST_HINTS for part in p.parts)
+        and not any(part in {"scripts", "script", "examples", "example", "fixtures", "fixture", "generated"} for part in p.parts)
+        and not any(hint in p.name.lower() for hint in TEST_HINTS)
+    )[:120]
+
     # Targeted probes for owner-map areas that raw source samples cannot
     # discriminate (logging/audit vs entry/UI). Conservative patterns to avoid
     # noise: audit uses substrings, entry uses exact stems.
     audit_samples = sorted(
         rel(root, p)
         for p in files
-        if any(tok in _AUDIT_TOKENS for tok in p.stem.lower().replace("-", "_").replace(".", "_").split("_"))
+        if p.suffix.lower() in SOURCE_EXTS
+        and any(tok in _AUDIT_TOKENS for tok in p.stem.lower().replace("-", "_").replace(".", "_").split("_"))
     )[:20]
     entry_samples = sorted(
         rel(root, p)
@@ -494,7 +633,12 @@ def main() -> int:
     instruction_files = collect_instruction_files(root)
     readme = readme_excerpt(root)
     deps = manifest_deps(root)
-    targets = build_targets(root)
+    target_details = build_target_details(root)
+    targets = sorted({item["name"] for item in target_details})
+    gates = gate_inventory(target_details)
+    package_scripts = collect_package_scripts(root)
+    ci_commands = collect_ci_commands(root)
+    fitness_registry = collect_fitness_registry(root)
 
     result = {
         "root": str(root),
@@ -507,6 +651,7 @@ def main() -> int:
         "evidence": evidence,
         "ci_files": ci_files,
         "test_files_sample": test_files,
+        "production_source_samples": production_source_samples,
         "docs_sample": docs,
         "audit_samples": audit_samples,
         "entry_samples": entry_samples,
@@ -525,6 +670,11 @@ def main() -> int:
         "readme_excerpt": readme,
         "manifest_deps": deps,
         "build_targets": targets,
+        "build_target_details": target_details,
+        "gate_inventory": gates,
+        "package_scripts": package_scripts,
+        "ci_commands": ci_commands,
+        "fitness_registry": fitness_registry,
         "guardrail_questions": [
             "What is the project's real profile? Read readme_excerpt + manifest_deps + the project's own AGENTS.md and state it -- do not trust a scanner label.",
             "Which existing instruction files (AGENTS.md / .claude|cursor|codex/rules / CONTRIBUTING) already state rules? Read them as authoritative and gap-fill, never duplicate.",

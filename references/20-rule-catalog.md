@@ -21,6 +21,11 @@ Generate rules from these categories. Do not add uncategorized rules unless you 
 15. Module Readiness and Fitness Functions
 16. Interface and Port Contracts
 17. Documentation Deliverables
+18. Requirement, Risk, and Control Traceability
+19. Product Experience and Lifecycle
+20. Production Readiness and Operations
+21. Commercial Delivery and Governance
+22. AI Assurance Overlay
 
 ## 1. Evidence Integrity
 
@@ -369,7 +374,10 @@ Examples:
 
 ## 12. Supply Chain and Release
 
-Purpose: prevent overclaiming artifact trust. Calibrate against **SLSA v1.0 Build Track** (L0 none, L1 provenance exists, L2 signed provenance from a hosted builder, L3 hardened/isolated builder). Provenance is worthless unless it is **verified at consumption/deploy**, not only produced.
+Purpose: prevent overclaiming artifact trust. Calibrate against the stable
+**SLSA v1.2 Build and Source Tracks** and the selected project profile.
+Provenance is worthless unless it is verified at consumption/deploy, not only
+produced.
 
 ```text
 SupplyChainGate:
@@ -378,7 +386,7 @@ SupplyChainGate:
   license_policy:
   lockfile_policy:
   sbom:                            # attestable SBOM predicate
-  provenance_level:                # SLSA Build L1 | L2 | L3
+  source_and_build_level:          # selected SLSA v1.2 Source/Build requirements
   signing:                         # Sigstore/cosign, npm provenance, GitHub artifact attestation
   trusted_publishing:              # OIDC; no long-lived publish tokens
   artifact_verified_at_deploy:     # slsa-verifier / gh attestation verify BEFORE deploy
@@ -393,7 +401,7 @@ Claim levels (each backed by evidence, not assertion):
 dependency_scan_present
 ci_supply_chain_gate_passed
 artifact_verifiable                 # signed artifact + SBOM
-provenance_verified_at_deploy      # SLSA L2/L3 AND verified, not merely produced
+provenance_verified_at_deploy      # selected SLSA requirements AND verified
 release_grade_supply_chain_assurance
 ```
 
@@ -558,3 +566,117 @@ Rules:
 - longer-form design, tutorial, report, or milestone docs can sync later only when their stale window is explicit;
 - module/API docs should identify responsibility, public API, dependencies, modification risk, tests, and key decisions;
 - docs must not duplicate facts owned by code, generated contracts, or active instruction files.
+
+## 18. Requirement, Risk, and Control Traceability
+
+Purpose: prove that delivered behavior and quality work derive from an approved
+need and have objective acceptance evidence.
+
+```text
+TraceabilityGate:
+  requirement_id:
+  business_owner:
+  acceptance_outcome:
+  risks:
+  controls:
+  tests_or_fitness_functions:
+  evidence_records:
+  release_or_runtime_outcome:
+  broken_link_rejects_claim: true
+```
+
+Every in-scope business requirement must reach at least one risk, control,
+verification path, and evidence record. Every control must trace back to a risk
+or binding delivery obligation. Orphan requirements and orphan controls fail
+the maturity where they apply.
+
+## 19. Product Experience and Lifecycle
+
+Purpose: make commercial usability and the full customer lifecycle testable.
+
+```text
+ProductLifecycleGate:
+  primary_user_journeys:
+  accessibility_target:
+  supported_locales_and_fallback:
+  installation:
+  first_run_and_configuration:
+  upgrade_and_data_migration:
+  rollback_or_recovery:
+  uninstall_and_data_retention:
+  compatibility_matrix:
+  user_support_and_diagnostics:
+```
+
+Commercial user-facing delivery requires real-workflow evidence for applicable
+journeys, accessibility, internationalization, installation, upgrade,
+rollback/recovery, and uninstall. An owner-approved `NOT_APPLICABLE` rationale
+is required for any omitted lifecycle stage.
+
+## 20. Production Readiness and Operations
+
+Purpose: require evidence that the product can be operated, recovered, and
+improved after release.
+
+```text
+ProductionReadinessGate:
+  service_or_runtime_owner:
+  slis_slos_and_error_budget:
+  capacity_and_load_model:
+  observability_and_alert_actionability:
+  backup_restore_and_recovery_test:
+  deployment_rollback_and_change_safety:
+  incident_response_and_learning:
+  vulnerability_response:
+  business_continuity:
+  dora_metrics:
+```
+
+Do not treat a backup configuration as restore evidence, an alert definition as
+an actionable alert, or a runbook as a rehearsed recovery. Production readiness
+requires executed scenarios at the profile's required freshness.
+
+## 21. Commercial Delivery and Governance
+
+Purpose: bind distribution, support, legal, security, and release authority to
+the explicitly selected market and product model.
+
+```text
+CommercialDeliveryGate:
+  target_market:
+  distribution_model:
+  explicit_legal_and_regulatory_profile:
+  licensing_and_third_party_notices:
+  privacy_and_data_governance:
+  vulnerability_disclosure_and_support_policy:
+  release_artifact_identity_and_verification:
+  support_maintenance_and_end_of_life:
+  release_authority:
+```
+
+Do not infer laws from repository content. Missing expertise or business
+process remains `TODO` or `BLOCKED`, never implicit `PASS`. Open-source projects
+may map independent cross-audit to a separate quality agent and release
+authority to a project owner.
+
+## 22. AI Assurance Overlay
+
+Purpose: add system-level assurance when the delivered product contains an AI
+model, agent, generated decision, or autonomous tool action.
+
+```text
+AIAssuranceGate:
+  intended_use_and_prohibited_use:
+  data_model_and_tool_inventory:
+  evaluation_dataset_and_scenario_origin:
+  quality_safety_security_privacy_metrics:
+  prompt_injection_and_tool_abuse_tests:
+  human_oversight_and_high_impact_approval:
+  transparency_and_user_recourse:
+  drift_monitoring_and_re_evaluation_trigger:
+  incident_and_kill_switch:
+```
+
+AI-assisted development of ordinary software does not by itself make the
+product an AI system. When this overlay applies, model-only scores cannot replace
+end-to-end product, tool-boundary, misuse, and human-oversight evidence.

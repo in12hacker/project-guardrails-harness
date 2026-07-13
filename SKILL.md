@@ -1,81 +1,95 @@
 ---
 name: project-guardrails-harness
-description: Use when asked to create, audit, migrate, evolve, or adapt engineering rules, architecture guardrails, CI quality gates, verification harnesses, release criteria, CODEOWNERS / ownership boundaries, supply-chain assurance (SLSA, build provenance, artifact signing), technical-debt ratchets, ADRs, project memory, or project-specific development standards for ANY software project — library, web app, backend service, infrastructure, security product, mobile, embedded, data platform, or AI agent system. Use this to turn a repository into evidence-backed rules (anchored to code paths, owners, CI/runtime evidence, and a verification plan) instead of trusting documentation or claims, and to keep those rules evolving from observed development work. Trigger it whenever someone wants guardrails, quality gates, release readiness, an owner map, durable coding lessons, or to check whether docs/ADRs still match the code — even if they never say the word "guardrails".
+description: "Use when asked to create, execute, audit, migrate, or evolve a whole-project quality framework, engineering rules, architecture guardrails, CI gates, product acceptance, production readiness, commercial release criteria, ownership, supply-chain assurance, technical-debt convergence, or project memory for ANY software project. This skill is a lifecycle quality control plane: it turns business requirements and repository evidence into machine-readable controls, runs local gates, records evidence, and blocks Codex completion/release claims when applicable controls are not current PASS. It supports greenfield scaffolding, brownfield convergence, subproject-scoped assurance, independent cross-audit, and AI-system overlays."
 ---
 
 # Project Guardrails Harness
 
-Create portable, project-specific engineering guardrails and verification harnesses from repository evidence.
+Create and continuously execute a portable, project-specific commercial delivery quality framework.
 
 ## Core Rule
 
-Use **Evidence over Claims**. Documentation, issue comments, and team assertions are inputs to verify, not proof. A generated rule is valid only when it is anchored to code paths, owner boundaries, CI/runtime evidence, and an explicit verification plan.
+Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable control. `FAIL`, `BLOCKED`, `TODO`, `DISPUTED`, and `STALE` block the associated completion, maturity, or release claim.
 
 ## Workflow
 
-1. **Load existing project memory**
-   - If `.guardrails/INDEX.md` exists, read it first. Then read only the files relevant to the task: `memory.md` for durable lessons, `rules/hard.md` for PR/review work, `harness.md` for verification, `supply-chain.md` for releases, and `decisions.md` for unresolved migrations.
-   - Treat existing `.guardrails/` entries as versioned hypotheses unless they point to live code paths, owners, and verification evidence. Stale paths or commands must become update items, not inherited truth.
+1. **Load the quality control plane**
+   - Read `.guardrails/quality-manifest.yaml`, `control-registry.yaml`, `evidence-ledger.json`, then `INDEX.md` and task-relevant files.
+   - Validate scope and evidence freshness before inheriting any prior PASS.
 
-2. **Scan the repo**
-   - The skill ships a scanner at `scripts/scan_project.py`, inside this skill's own folder. Run it from the target repo root so it works no matter where the skill is installed in Claude Code personal or project scope:
-     ```bash
-     SCAN="${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/project-guardrails-harness}/scripts/scan_project.py"
-     [ -f "$SCAN" ] || SCAN=".claude/skills/project-guardrails-harness/scripts/scan_project.py"
-     python3 "$SCAN" --root . --out "/tmp/project-guardrails-scan-$(basename "$(pwd)")-$$.json"
-     ```
-     Claude Code sets `${CLAUDE_SKILL_DIR}` to this skill's directory at runtime. If a client does not export it, the first fallback resolves the personal-scope path and the second the project-scope path, so the command is portable across the supported install locations instead of pinned to one path. The output filename embeds the repo name and shell PID, so back-to-back runs on different repos (or concurrent sessions) don't overwrite each other's scan — pass the resulting path to the renderer. If the scanner still cannot be found, collect the evidence manually (next bullet).
-   - If the script is unavailable, manually collect the same evidence: languages, package managers, CI files, tests, docs, release files, security files, deployment files, public contracts.
+2. **Require explicit profile decisions**
+   - Before initialization, require product type, development mode, distribution model, target market, criticality, target maturity, assessed scope, and whether this is an AI system.
+   - Never infer legal/regulatory applicability or target market from repository keywords.
 
-3. **Classify the project — your judgment, not a scanner label**
-   - The scanner deliberately does not classify (that is a judgment call, not a deterministic one). Read its `readme_excerpt` + `manifest_deps` and the project's own AGENTS.md / README, then state the profile in your own words: product / users / runtime / release model / trust boundaries.
-   - Read `references/10-project-profiles.md` when the type is unclear or mixed; classify by product/runtime/release model, never by language alone.
+3. **Initialize or migrate the framework**
+   - Run the bundled initializer with explicit choices. It scans repository evidence, renders human guidance, and creates the three machine sources of truth.
+   - Greenfield projects get the skeleton before feature development. Brownfield projects remain globally `not_ready` until debt is eliminated, but verified convergence tasks may complete.
 
-4. **Build the owner map**
-   - Identify owners for domain identity, config, policy/rules, audit/logs, API/wire contract, UI/product behavior, platform/runtime I/O, release artifacts, and test harness.
-   - Do not invent owners from desired architecture. Use code paths first; record uncertainty as a pre-decision item.
+   ```bash
+   SKILL_DIR="${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/project-guardrails-harness}"
+   [ -f "$SKILL_DIR/scripts/init_quality_framework.py" ] || SKILL_DIR=".claude/skills/project-guardrails-harness"
+   python3 "$SKILL_DIR/scripts/init_quality_framework.py" --root . \
+     --development-mode <explicit> --target-maturity <explicit> \
+     --product-type <explicit> --distribution-model <explicit> \
+     --market <explicit> --criticality <explicit> \
+     --data-sensitivity <explicit> --deployment-model <explicit> \
+     --support-model <explicit> --primary-user <explicit> \
+     --no-ai-system --scope-mode <explicit> \
+     --legal-profile <explicit>
+   ```
+   - Replace `--no-ai-system` with `--ai-system` when the delivered product itself contains AI behavior.
 
-5. **Generate rules as a gap-check (ingest first, don't overwrite)**
-   - If the scan's `instruction_files` is non-empty, read those AGENTS.md / `.claude`|`cursor`|`codex` rules / CONTRIBUTING first and treat them as the **single source of truth**. Your job is to **link to them and fill gaps — never duplicate** a fact that already lives there.
-   - Then gap-check each family in `references/20-rule-catalog.md`: already enforced (by what command / file)? gap? if genuinely new, state trigger · owner · required evidence · reject condition · verification.
-   - When a project has many modules or check scripts, generate objective module-readiness and fitness-function rules: every active check needs an owner, gate, scope, command entry point, and baseline/ratchet semantics.
-   - For protocol parsers, runtime observers, proxies, agent/tool bridges, stream assemblers, kernel/user boundaries, policy classifiers, or security enforcement points, include `BoundaryRobustness` so weak hints, malformed input, ID-domain drift, state precedence, isolation, false positives/negatives, and pre-effect timing are tested.
-   - Use generated `rules/candidates.md` as a **drafting queue**, not an authority. Promote a candidate only after a human validates the project-specific wording, owner, reject condition, and runnable check.
-   - A hard rule without a runnable check is a wish, not a rule. Prefer promoting a rule from `memory.md` once it is observed in real work over inventing it up front.
+4. **Ingest existing truth before adding controls**
+   - Read existing instruction files, CI, build targets, test registries, fitness runners, release workflows, contracts, and operations docs.
+   - Link and gap-fill; do not duplicate an existing authoritative fact.
 
-6. **Generate harness against the project's real commands**
-   - Use `references/30-harness-catalog.md`, but map each gate to the **actual command** the project already uses (from the scan's `build_targets`, e.g. `make gate`, `coverage-gate`, `verify-release`) — not a generic "infer from ecosystem" guess. If a gate has no real command yet, that is a gap to create, not a command to fabricate.
-   - Separate PR gate, closeout gate, product acceptance gate, and release gate.
-   - For any test used as a gate, require test basis, risk, level/size, runner, evidence artifacts, cleanup, residual risk, and scenario origin (real product vs equivalent CLI vs sensor smoke vs mock/contract).
-   - Mock/contract tests cannot prove product acceptance unless the product itself is a library or contract-only component.
-   - For boundary-sensitive work, generate a `BoundaryRobustnessHarness` in addition to ordinary unit/integration/e2e gates.
+5. **Build end-to-end traceability**
+   - Every business requirement maps to risk, owner/ADR, control, test/fitness function, evidence, and delivery/runtime outcome.
+   - Broken traceability blocks the maturity where the requirement applies.
+   - After an approved registry edit, run `python3 "$SKILL_DIR/scripts/sync_traceability.py" --root .`; never hand-edit the derived graph.
 
-7. **Validate against reality**
-   - Run existing local gates where feasible.
-   - Check remote CI for mergeability if the task involves PR readiness.
-   - Mark unavailable root/device/cloud/manual checks as blocked/manual, not pass.
+6. **Develop under task-scoped quality controls**
+   - Before editing, identify affected requirements, controls, owners, and gates.
+   - During work, create missing scripts, CI, configs, tests, docs, dependencies, or scaffolding needed by applicable controls.
+   - Installing dependencies, using secrets/paid services, remote or production mutation, and privileged execution require separate user authorization.
 
-8. **Write adoption plan**
-   - Start with advisory gates and inventory only when a hard gate would break the project.
-   - Ratchet toward hard gates with owners, dates, and deletion criteria.
-   - Read `references/40-rule-lifecycle.md` when the task asks how rules should keep evolving during development.
+7. **Execute controls and record evidence**
+   - Local unprivileged controls run automatically when relevant. Commands are project-owned argv arrays, not fabricated shell strings.
+   - Use the evaluator; a non-zero result blocks completion claims.
 
-9. **Update durable project memory**
-   - After each meaningful coding task, audit whether the work revealed a reusable fact: owner, risk area, command, acceptance surface, test gap, stale rule, repeated review finding, release assumption, or incident class.
-   - Record only evidence-backed facts in `.guardrails/memory.md`; keep guesses in `decisions.md`. Promote facts through `observed_once → repeated → verified_by_tests → enforced_by_ci → hard_gate`; delete or supersede stale facts.
+   ```bash
+   python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --run \
+     --audit-stage self --actor codex
+   ```
+
+8. **Audit independently**
+   - Self-audit produces raw evidence. Cross-audit uses an independent context and rereads original evidence. Release authority confirms scope/market/release. Regulated profiles add third-party audit.
+   - Disagreement is `DISPUTED`; it cannot be waived into PASS.
+
+9. **Make or refuse the claim**
+   - `--claim` succeeds only when every applicable control for the target maturity has a current PASS and every required audit stage has a passing run for the same commit.
+   - Human brownfield feature work uses `--claim --claim-scope task --control <affected-id>...`; this proves only the named task controls and never changes failed global readiness.
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --claim
+   ```
+
+10. **Learn and evolve**
+   - Feed incidents, escaped defects, SLO breaches, customer outcomes, vulnerability response, and repeated review findings back into project controls and durable memory.
+   - Promote portable lessons only when they are project-agnostic and backed by repeated evidence.
 
 ## Output Shape
 
-Emit a **progressive-disclosure directory**, not one monolithic file. An agent loads `INDEX.md` every time and reads the other files just-in-time by relevance (a release reads `supply-chain.md` + the release row of `harness.md`; a PR review reads `rules/hard.md`). A single big file buries critical rules mid-document — where models recall worst ("lost in the middle") — and re-costs tokens on every read. Scaffold it from the scan with the renderer:
-
-```bash
-SCAN_R="${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/project-guardrails-harness}/scripts/render_guardrails.py"
-[ -f "$SCAN_R" ] || SCAN_R=".claude/skills/project-guardrails-harness/scripts/render_guardrails.py"
-python3 "$SCAN_R" "<your-scan.json>" --out-dir .guardrails/
-```
+Emit a **progressive-disclosure directory**, not one monolithic file. The three
+machine-readable files are authoritative; Markdown explains their application
+and never overrides them. Use the initializer in step 3 to scaffold the set.
 
 ```text
 .guardrails/
+├── quality-manifest.yaml   # selected profile, scope, maturity, audit and claim policy
+├── control-registry.yaml   # applicable controls, owners, execution and evidence requirements
+├── evidence-ledger.json    # append-only execution/audit evidence bound to commits
+├── traceability-graph.json # derived requirement → risk → control → test → evidence graph
 ├── INDEX.md          # ALWAYS loaded: one-line profile, owner summary, hard-gate shortlist, links (keep <150 lines)
 ├── profile.md        # evidence: README excerpt + deps + build targets + existing rules
 ├── owners.md         # owner map (semantic owners vs adapters)
@@ -95,14 +109,26 @@ Keep `INDEX.md` under ~150 lines and each file under ~300 lines; put the most sa
 ## When More Context Is Needed
 
 - Read `references/00-system-model.md` for the rationale, source standards, and the conceptual model.
+- Read `references/05-delivery-lifecycle.md` for maturity levels, claim semantics, debt treatment, and authorization boundaries.
 - Read `references/10-project-profiles.md` to adapt rules for libraries, web apps, infra, security products, AI agent systems, mobile apps, embedded systems, or data platforms.
+- Read `references/15-standards-and-quality-model.md` for stable standards, quality characteristics, and explicit market/profile choices.
 - Read `references/20-rule-catalog.md` for categorized guardrail families, including cleanliness, parameter/variable flow, and boundary robustness.
+- Read `references/25-control-and-traceability.md` for machine controls, evidence records, and end-to-end traceability.
 - Read `references/30-harness-catalog.md` for CI/test/product/release gate patterns, including test-basis metadata, fitness registries, interface contracts, documentation deliverables, and boundary robustness matrices.
+- Read `references/35-audit-and-evidence.md` for audit independence, evidence freshness, authorization, and claim enforcement.
 - Read `references/40-rule-lifecycle.md` for continuous rule iteration, project memory, fact maturity, ratchets, baseline cleanup semantics, module readiness, and stale-rule deletion.
+- Read `references/45-adoption-and-operations.md` for greenfield/brownfield adoption, production operation, commercial delivery, and feedback loops.
 
 ## Non-Negotiables
 
-- Do not claim “complete”, “mergeable”, “release-ready”, or “closed” without commit/CI/runtime evidence.
+- Do not claim task completion unless all applicable task-scoped controls are current `PASS`.
+- Do not claim a maturity level, project completion, mergeability, or release readiness unless every applicable control and required audit stage for that claim is current `PASS` for the same commit and scope.
+- Do not convert `FAIL`, `BLOCKED`, `TODO`, `DISPUTED`, or `STALE` into a passing claim. Known debt remains blocking for project maturity even when verified human-project feature work may continue.
+- Do not infer target market, legal obligations, regulatory applicability, or target maturity. Require explicit project selection.
+- Do not use draft standards as mandatory baselines when a stable official release exists.
+- Do not let a subproject-scoped assessment claim whole-project readiness.
+- Do not mark a control `NOT_APPLICABLE` without an owner-approved rationale and scope record.
+- Do not install dependencies, use secrets or paid services, mutate remote/production state, or run privileged operations without separate user authorization.
 - Do not trust docs over code.
 - Do not let route/controller/UI/daemon layers become silent business owners.
 - Do not collapse product acceptance into unit, mock, or contract tests.

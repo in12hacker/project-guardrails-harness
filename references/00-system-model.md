@@ -2,17 +2,28 @@
 
 This is the durable readme-equivalent for the skill. It explains the transferable model behind generated project guardrails and harnesses.
 
+## Contents
+
+Objective; External Calibration; Core Concepts; Transferable Lessons;
+Portable vs Project-Specific; Standard Output.
+
 ## Objective
 
-Generate a **minimum enforceable engineering baseline** for a specific repository. Do not copy one project's rules into another. Instead:
+Generate and operate an **evidence-backed delivery quality control plane** for a
+specific repository. It must govern work from requirements through commercial
+delivery and production feedback without copying one project's rules into
+another. Instead:
 
 1. scan repository evidence;
 2. classify the product/runtime/release profile;
 3. identify semantic owners;
 4. choose rule families that match risk;
 5. attach harnesses to rules;
-6. ratchet legacy debt down;
-7. update rules when audits or incidents reveal new invariant classes.
+6. trace requirements to risks, controls, tests, evidence, and outcomes;
+7. execute controls and preserve commit-bound evidence;
+8. separate self-audit, cross-audit, and release authority;
+9. converge legacy debt without overstating readiness;
+10. update controls when audits, incidents, or customer outcomes reveal new invariant classes.
 
 ## External Calibration
 
@@ -21,7 +32,14 @@ Use current official or authoritative standards as anchors, then adapt to reposi
 | Source | Portable lesson |
 |---|---|
 | NIST SSDF SP 800-218 | Secure development practices must be embedded across the SDLC and used to reduce vulnerabilities and recurrence. |
-| SLSA v1.0 Build Track (L1–L3) | Supply-chain claims require signed build provenance from a hosted (L2) or hardened/isolated (L3) builder — and that provenance must be **verified at deploy**. Provenance that is produced but never verified is theater. |
+| ISO/IEC 25010:2023 + 25019:2023 | Product quality and quality-in-use require more than code correctness: suitability, reliability, security, usability, compatibility, maintainability, portability, safety, effectiveness, efficiency, satisfaction, and freedom from risk. |
+| OWASP ASVS 5.0.0 | Web application security requirements need explicit verification levels and objective evidence. |
+| OpenSSF OSPS Baseline 2026.02.19 | Open-source governance and security controls must be calibrated to project maturity and distribution reality. |
+| SLSA v1.2 Build and Source Tracks | Supply-chain claims require source/build attestations appropriate to the selected level, and provenance must be verified at consumption or deploy. |
+| CycloneDX 1.7 / SPDX 3.0 | SBOM and software identity evidence should be machine-readable and tied to released artifacts. |
+| WCAG 2.2 / ISO/IEC 40500:2025 | User-facing commercial software needs explicit accessibility acceptance. |
+| NIST AI RMF 1.0 + Generative AI Profile | AI systems need an assurance overlay for validity, safety, security, transparency, privacy, and human oversight. |
+| DORA | Delivery performance and operational learning should use deployment frequency, lead time, change fail rate, failed deployment recovery time, and rework rate. |
 | OpenSSF Scorecard | Repository security can be checked through CI, review, branch protection, pinned dependencies, token permissions, packaging, signed releases, fuzzing, SAST, and dependency health. |
 | OWASP SAMM | Assurance work fits Governance, Design, Implementation, Verification, and Operations. |
 | C4 + ADR | Architecture must be explainable by context/container/component/code views and durable decisions. |
@@ -47,6 +65,19 @@ Evidence:
   runtime_or_product_evidence:
   residual_risk:
 ```
+
+Evidence is stored in an append-only ledger and bound to control, commit,
+scope, environment, actor, audit stage, and freshness. Only current `PASS`
+satisfies an applicable control.
+
+### Three Machine Sources Of Truth
+
+- `quality-manifest.yaml`: selected profile, maturity, market, scope, audit and claim policy;
+- `control-registry.yaml`: applicability, owners, execution, thresholds, and required evidence;
+- `evidence-ledger.json`: immutable execution and audit observations.
+
+The traceability graph is derived from these sources and project requirements;
+Markdown is explanatory and cannot override machine state.
 
 ### Project Profile Before Rules
 
@@ -85,7 +116,7 @@ A rule without a verification path is advisory. Hard gates require reliable auto
 2. **Do not treat language as product type.** Rust can be a CLI, kernel tool, SaaS backend, or SDK.
 3. **Do not let adapters become owners.** Routes/controllers/UI/daemon scripts are usually adapters, not semantic owners.
 4. **Do not collapse acceptance levels.** Unit, mock, contract, real-stack, product acceptance, and release evidence prove different things.
-5. **Do not overclaim supply-chain maturity.** A dependency scan is not provenance, and produced provenance is not assurance unless it is verified at deploy (SLSA Build L2/L3 + Sigstore + Trusted Publishing).
+5. **Do not overclaim supply-chain maturity.** A dependency scan is not provenance, and produced provenance is not assurance unless it is verified at consumption or deploy under the selected SLSA v1.2 Build/Source requirements.
 6. **Do not add abstractions without deletion (Occam's razor).** Abstractions should remove duplication, drift, or platform coupling. Prefer zero-dependency solutions when a native tool (curl/readelf/clippy) already covers the need. Every new script, file, or tool must justify its existence over reusing what is already present.
 7. **Do not store stale rules.** Rules need owners, status, review dates, and deletion/supersession paths.
 8. **Do not turn fallback into silence.** Fail-open/fail-closed is a layer decision with typed degraded evidence.
@@ -115,6 +146,10 @@ Project-specific:
 
 ```text
 ProjectGuardrails:
+  quality_manifest:
+  control_registry:
+  evidence_ledger:
+  traceability_graph:
   project_profile:
   evidence_inventory:
   owner_map:

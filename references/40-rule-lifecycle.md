@@ -2,13 +2,20 @@
 
 Rules must evolve with the project. Stale rules are architecture debt.
 
+## Contents
+
+Rule and Fact Maturity; Candidate Rules; Ratcheting; Module Readiness;
+Baseline Semantics; Control Status and Claims; Continuous Updates; Task
+Learning; Update/Delete/Drift Audits; Project Memory; Skill Promotion and
+Maintenance.
+
 ## Rule Maturity Levels
 
 | Level | Meaning | Use |
 |---|---|---|
 | `proposal` | plausible rule, not validated | planning |
 | `advisory` | warning and inventory only | legacy discovery |
-| `ratchet` | new violations fail, old baseline allowed | debt reduction |
+| `ratchet` | all violations fail the relevant readiness claim; baseline measures whether known debt shrinks and prevents new debt | debt convergence |
 | `hard_gate` | any violation fails PR/CI | mature invariant |
 | `manual_signoff` | needs human/root/device/cloud evidence | closeout/release |
 | `superseded` | replaced by stronger/newer rule | historical link |
@@ -71,7 +78,11 @@ Reject or rewrite a candidate when:
 
 ## Ratcheting And AI-Generated Code (2026)
 
-- **Ratchet = "don't make it worse".** A PR may not increase measured debt (violation count, uncovered lines, hotspot code-health drop) beyond the current baseline; legacy is grandfathered until touched. Prefer this over flat thresholds, which reward gaming and block useful deletes.
+- **Ratchet = measured convergence, not grandfathering.** New debt always fails.
+  Known debt also fails the project maturity/release claim until fixed. In a
+  human brownfield project, policy may still allow a scoped feature task when
+  all affected controls pass and measured debt does not grow; this does not
+  change the known violations to `PASS` or make the project ready.
 - **Baseline = cleanup inventory, not approval (mandatory).** A baseline or allowlist must make known debt visible and measurable. It must NOT turn a detected violation into proof of acceptability. Any violation (baselined or new) must FAIL the gate; the baseline only classifies known vs new for reporting clarity. The only way to PASS is to actually fix violations. Separate design-scope exemptions (the rule truly does not apply, declared in code with a reason) from cleanup debt (the rule applies and must be fixed).
 - **Turn decisions into fitness functions.** An ADR or architecture rule should be enforced, not merely documented: render it as a runnable check (a test, a static-analysis rule, an OPA policy) that fails the PR when violated. A doc claim is a hypothesis; a runnable check is evidence.
 - **Verification, not approval, for AI-generated code.** Human approval does not scale against AI-generated volume; the gate is that the change satisfies spec/tests/contracts/owners, not that a human rubber-stamped it. Code Health (complexity) can flag code too tangled for safe automated refactoring.
@@ -120,7 +131,25 @@ Guidance:
 - baseline updates should normally shrink the inventory or explicitly explain a profile change;
 - new violations must fail; baselined (known) violations must also fail (the baseline is a todo list, not permission);
 - a green gate with hidden growing debt is stale evidence, not maturity;
-- during transition (debt not yet cleared), known violations may be marked `advisory` (CI warn, not block) while new violations block; once the baseline clears, switch to `hard_gate` (all violations block).
+- during human brownfield transition, a separate task-scope policy may permit
+  work to continue while the global debt control remains `FAIL`; once the
+  baseline clears, the project-level control becomes `PASS` and the check stays
+  a hard gate against regression.
+
+## Control Status And Claims
+
+Rule maturity describes how a rule is enforced; control status describes the
+current objective result. Keep them separate.
+
+- `PASS` and approved `NOT_APPLICABLE` are terminal observations, but only
+  `PASS` satisfies an applicable control.
+- `FAIL`, `BLOCKED`, `TODO`, `DISPUTED`, and `STALE` block the associated claim.
+- evidence becomes stale when its commit, scope, environment, expiry, command,
+  or control definition no longer matches.
+- self-audit cannot provide the independent cross-audit or release-authority
+  decision required by a maturity profile.
+- a stable standard update triggers applicability review and controlled
+  migration; drafts may inform planning but cannot silently become mandatory.
 
 ## Continuous Update Loop
 

@@ -1,6 +1,6 @@
 ---
 name: project-guardrails-harness
-description: "Use when asked to create, execute, audit, migrate, or evolve a whole-project quality framework, engineering rules, architecture guardrails, CI gates, product acceptance, production readiness, commercial release criteria, ownership, supply-chain assurance, technical-debt convergence, or project memory for ANY software project. This skill is a lifecycle quality control plane: it turns business requirements and repository evidence into machine-readable controls, runs local gates, records evidence, and blocks Codex completion/release claims when applicable controls are not current PASS. It supports greenfield scaffolding, brownfield convergence, subproject-scoped assurance, independent cross-audit, and AI-system overlays."
+description: "Use when asked to create, execute, audit, regenerate, or evolve a whole-project quality framework, engineering rules, architecture guardrails, CI gates, product acceptance, production readiness, commercial release criteria, ownership, supply-chain assurance, technical-debt convergence, or project memory for ANY software project. This skill is a lifecycle quality control plane: it turns business requirements and repository evidence into machine-readable controls, runs local gates, records evidence, and blocks Codex completion/release claims when applicable controls are not current PASS. It supports greenfield scaffolding, brownfield convergence, subproject-scoped assurance, independent cross-audit, and AI-system overlays."
 ---
 
 # Project Guardrails Harness
@@ -21,7 +21,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Before initialization, require product type, development mode, distribution model, target market, criticality, target maturity, assessed scope, and whether this is an AI system.
    - Never infer legal/regulatory applicability or target market from repository keywords.
 
-3. **Initialize or migrate the framework**
+3. **Initialize the v2 framework**
    - Run the bundled initializer with explicit choices. It scans repository evidence, renders human guidance, and creates the three machine sources of truth.
    - Greenfield projects get the skeleton before feature development. Brownfield projects remain globally `not_ready` until debt is eliminated, but verified convergence tasks may complete.
 
@@ -38,10 +38,21 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      --legal-profile <explicit>
    ```
    - Replace `--no-ai-system` with `--ai-system` when the delivered product itself contains AI behavior.
+   - This is a v2-only control plane. Regenerate experimental state rather than adding v1 readers or compatibility branches.
+   - For AI brownfield work, register the reviewed campaign specification before any task or phase claim:
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/register_campaign.py" --root . \
+     --campaign /path/to/reviewed-campaign.json
+   ```
 
 4. **Ingest existing truth before adding controls**
    - Read existing instruction files, CI, build targets, test registries, fitness runners, release workflows, contracts, and operations docs.
    - Link and gap-fill; do not duplicate an existing authoritative fact.
+   - Initialization inventories detected instruction sources as mandatory
+     `unmapped` federated records. Review each source, assign its semantic owner
+     and control references, set its digest-bound status, then sync traceability;
+     an unmapped mandatory source blocks claims but not control execution.
 
 5. **Build end-to-end traceability**
    - Every business requirement maps to risk, owner/ADR, control, test/fitness function, evidence, and delivery/runtime outcome.
@@ -60,19 +71,35 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 
    ```bash
    python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --run \
-     --audit-stage self --actor codex
+     --audit-stage self --actor codex --authority-id virtual:developer \
+     --execution-context session-or-runner-id
    ```
 
 8. **Audit independently**
    - Self-audit produces raw evidence. Cross-audit uses an independent context and rereads original evidence. Release authority confirms scope/market/release. Regulated profiles add third-party audit.
    - Disagreement is `DISPUTED`; it cannot be waived into PASS.
+   - `cross`, `release_authority`, and `third_party` runs must provide a distinct
+     `--authority-id`, a distinct `--execution-context`, and `--review-run` for
+     the immediately preceding stage. A renamed actor label is not independence.
+   - Authority IDs must be registered for their stage in
+     `audit_policy.authorities`. The generated one-person profile uses separate
+     virtual developer, quality, and release-owner responsibilities.
 
 9. **Make or refuse the claim**
-   - `--claim` succeeds only when every applicable control for the target maturity has a current PASS and every required audit stage has a passing run for the same commit.
-   - Human brownfield feature work may use `--claim --claim-scope task --control <affected-id>...`; success records only a scoped task outcome and never changes failed global readiness. AI brownfield task evaluation requires registered campaign context and is rejected until that context is present.
+   - `--claim` reads `claim_policies.<scope>` and succeeds only when the scope's
+     deterministic outcome policy and audit stages are satisfied for the same bindings.
+   - Human brownfield feature work uses `--claim-scope task --control <affected-id>...`.
+     AI brownfield task/phase claims derive scope and ratchet policy from the active
+     campaign and require matching campaign revision, phase, and task identifiers.
+   - Successful outcomes are appended to the hash-chained `claims` ledger. Task or
+     phase completion never changes a failed debt control or whole-project readiness.
 
    ```bash
    python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --claim
+
+   python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --claim \
+     --claim-scope task --campaign-id <id> --campaign-revision <n> \
+     --phase-id <phase> --task-id <task>
    ```
 
 10. **Learn and evolve**

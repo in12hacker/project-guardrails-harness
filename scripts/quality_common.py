@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import datetime as dt
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,10 @@ CONTROL_STATUSES = {
 
 AUDIT_STAGES = {"self", "cross", "release_authority", "third_party"}
 SCHEMA_VERSION = "2.0"
+CLAIM_SCOPES = {"task", "phase", "project", "release"}
+FEDERATION_STATUSES = {"current", "stale", "disputed", "unmapped"}
+DEBT_STATUSES = {"open", "closed"}
+EXEMPTION_STATUSES = {"active", "expired", "revoked"}
 
 DEPENDENCY_MUTATION_PREFIXES = {
     ("npm", "install"), ("npm", "i"), ("pnpm", "install"),
@@ -56,6 +61,14 @@ def write_json_yaml(path: Path, data: dict[str, Any]) -> None:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def canonical_digest(data: dict[str, Any]) -> str:
@@ -147,7 +160,163 @@ def unknown_fields(value: dict[str, Any], allowed: set[str], path: str) -> list[
     return [f"{path}.{field} is not allowed" for field in sorted(set(value) - allowed)]
 
 
-def validate_manifest(manifest: dict[str, Any]) -> list[str]:
+def non_empty_strings(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(
+        isinstance(item, str) and bool(item.strip()) for item in value
+    )
+
+
+def valid_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value.lower()
+    )
+
+
+def valid_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def safe_relative_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    path = Path(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def path_inside_root(root: Path, relative: str) -> Path | None:
+    if not safe_relative_path(relative):
+        return None
+    candidate = root / relative
+    try:
+        candidate.resolve(strict=False).relative_to(root.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def validate_exit_policy(policy: Any, path: str) -> list[str]:
+    if not isinstance(policy, dict):
+        return [f"{path} must be an object"]
+    errors = unknown_fields(
+        policy,
+        {"max_new_violations", "minimum_fixed_violations", "allow_open_cleanup_debt"},
+        path,
+    )
+    for field in ("max_new_violations", "minimum_fixed_violations"):
+        if not isinstance(policy.get(field), int) or policy[field] < 0:
+            errors.append(f"{path}.{field} must be a non-negative integer")
+    if not isinstance(policy.get("allow_open_cleanup_debt"), bool):
+        errors.append(f"{path}.allow_open_cleanup_debt must be boolean")
+    return errors
+
+
+def validate_campaign(campaign: Any, control_ids: set[str] | None = None) -> list[str]:
+    if not isinstance(campaign, dict):
+        return ["development_policy.active_campaign must be an object or null"]
+    errors = unknown_fields(
+        campaign,
+        {
+            "id", "revision", "baseline_commit", "baseline_registry_sha256",
+            "baseline_workspace_sha256", "target_maturity", "assessed_scope", "owner", "phases",
+        },
+        "development_policy.active_campaign",
+    )
+    prefix = "development_policy.active_campaign"
+    for field in ("id", "baseline_commit", "owner"):
+        if not isinstance(campaign.get(field), str) or not campaign[field].strip():
+            errors.append(f"{prefix}.{field} is required")
+    if not isinstance(campaign.get("revision"), int) or campaign["revision"] < 1:
+        errors.append(f"{prefix}.revision must be an integer >= 1")
+    if not valid_sha256(campaign.get("baseline_registry_sha256")):
+        errors.append(f"{prefix}.baseline_registry_sha256 must be a SHA-256 digest")
+    if not valid_sha256(campaign.get("baseline_workspace_sha256")):
+        errors.append(f"{prefix}.baseline_workspace_sha256 must be a SHA-256 digest")
+    if campaign.get("target_maturity") not in MATURITY_LEVELS:
+        errors.append(f"{prefix}.target_maturity is invalid")
+    if not non_empty_strings(campaign.get("assessed_scope")):
+        errors.append(f"{prefix}.assessed_scope must be a non-empty string list")
+    phases = campaign.get("phases")
+    if not isinstance(phases, list) or not phases:
+        return errors + [f"{prefix}.phases must be a non-empty array"]
+    phase_ids: set[str] = set()
+    task_ids: set[str] = set()
+    for phase_index, phase in enumerate(phases):
+        phase_path = f"{prefix}.phases[{phase_index}]"
+        if not isinstance(phase, dict):
+            errors.append(f"{phase_path} must be an object")
+            continue
+        errors.extend(unknown_fields(
+            phase,
+            {"id", "title", "affected_control_ids", "assessed_scope", "exit_policy", "tasks"},
+            phase_path,
+        ))
+        phase_id = phase.get("id")
+        if not isinstance(phase_id, str) or not phase_id:
+            errors.append(f"{phase_path}.id is required")
+        elif phase_id in phase_ids:
+            errors.append(f"duplicate campaign phase id: {phase_id}")
+        else:
+            phase_ids.add(phase_id)
+        if not isinstance(phase.get("title"), str) or not phase["title"].strip():
+            errors.append(f"{phase_path}.title is required")
+        phase_controls = phase.get("affected_control_ids")
+        if not non_empty_strings(phase_controls):
+            errors.append(f"{phase_path}.affected_control_ids must be a non-empty string list")
+        elif control_ids is not None:
+            unknown = sorted(set(phase_controls) - control_ids)
+            if unknown:
+                errors.append(f"{phase_path}.affected_control_ids contains unknown controls: {', '.join(unknown)}")
+        if not non_empty_strings(phase.get("assessed_scope")):
+            errors.append(f"{phase_path}.assessed_scope must be a non-empty string list")
+        errors.extend(validate_exit_policy(phase.get("exit_policy"), f"{phase_path}.exit_policy"))
+        tasks = phase.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            errors.append(f"{phase_path}.tasks must be a non-empty array")
+            continue
+        for task_index, task in enumerate(tasks):
+            task_path = f"{phase_path}.tasks[{task_index}]"
+            if not isinstance(task, dict):
+                errors.append(f"{task_path} must be an object")
+                continue
+            errors.extend(unknown_fields(
+                task,
+                {"id", "kind", "affected_control_ids", "assessed_scope", "exit_policy"},
+                task_path,
+            ))
+            task_id = task.get("id")
+            if not isinstance(task_id, str) or not task_id:
+                errors.append(f"{task_path}.id is required")
+            elif task_id in task_ids:
+                errors.append(f"duplicate campaign task id: {task_id}")
+            else:
+                task_ids.add(task_id)
+            if task.get("kind") not in {"debt_reduction", "framework_adoption", "correctness_fix"}:
+                errors.append(f"{task_path}.kind is invalid")
+            task_controls = task.get("affected_control_ids")
+            if not non_empty_strings(task_controls):
+                errors.append(f"{task_path}.affected_control_ids must be a non-empty string list")
+            else:
+                if isinstance(phase_controls, list) and not set(task_controls) <= set(phase_controls):
+                    errors.append(f"{task_path}.affected_control_ids must be within its phase")
+                if control_ids is not None:
+                    unknown = sorted(set(task_controls) - control_ids)
+                    if unknown:
+                        errors.append(f"{task_path}.affected_control_ids contains unknown controls: {', '.join(unknown)}")
+            if not non_empty_strings(task.get("assessed_scope")):
+                errors.append(f"{task_path}.assessed_scope must be a non-empty string list")
+            errors.extend(validate_exit_policy(task.get("exit_policy"), f"{task_path}.exit_policy"))
+    return errors
+
+
+def validate_manifest(
+    manifest: dict[str, Any], control_ids: set[str] | None = None,
+) -> list[str]:
     errors: list[str] = []
     errors.extend(unknown_fields(
         manifest,
@@ -176,6 +345,26 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
             errors.append(f"manifest.{name} must be an object")
     if errors:
         return errors
+    errors.extend(unknown_fields(
+        project, {"name", "root", "development_mode", "target_maturity"}, "project",
+    ))
+    errors.extend(unknown_fields(
+        profile,
+        {
+            "product_types", "distribution_model", "target_markets", "criticality",
+            "data_sensitivity", "deployment_models", "support_model", "primary_users",
+            "ai_system", "legal_profiles", "quality_dimensions",
+        },
+        "profile",
+    ))
+    errors.extend(unknown_fields(
+        scope,
+        {
+            "mode", "included_paths", "excluded_paths", "unassessed_dependencies",
+            "overall_project_claim_allowed",
+        },
+        "scope",
+    ))
     required_strings = {
         "project.name": project.get("name"),
         "project.root": project.get("root"),
@@ -195,6 +384,15 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         "ai_greenfield", "ai_brownfield", "human_greenfield", "human_brownfield",
     }:
         errors.append("project.development_mode is invalid")
+    enum_fields = {
+        "distribution_model": {"open_source", "private_commercial", "saas", "client_software", "embedded", "mixed"},
+        "criticality": {"low", "medium", "high", "critical"},
+        "data_sensitivity": {"public", "internal", "confidential", "restricted", "regulated"},
+        "support_model": {"community", "best_effort", "contracted", "managed", "none"},
+    }
+    for name, allowed in enum_fields.items():
+        if profile.get(name) not in allowed:
+            errors.append(f"profile.{name} is invalid")
     for name in (
         "product_types", "target_markets", "deployment_models", "primary_users",
         "legal_profiles", "quality_dimensions",
@@ -208,25 +406,91 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         errors.append("scope.mode must be full_repo or subproject")
     if scope.get("mode") == "subproject" and scope.get("overall_project_claim_allowed") is not False:
         errors.append("subproject scope must set overall_project_claim_allowed=false")
+    for name in ("included_paths", "excluded_paths", "unassessed_dependencies"):
+        if not isinstance(scope.get(name), list) or any(
+            not isinstance(item, str) for item in scope.get(name, [])
+        ):
+            errors.append(f"scope.{name} must be a string array")
     if authority.get("local_unprivileged_controls") is not True:
         errors.append("authority.local_unprivileged_controls must be true for automatic local evaluation")
+    authorization_classes = authority.get("separate_authorization_required")
+    allowed_authorizations = {
+        "dependency_install", "paid_service", "secrets", "remote_mutation",
+        "production_mutation", "privileged_execution",
+    }
+    if not non_empty_strings(authorization_classes) or not set(authorization_classes) <= allowed_authorizations:
+        errors.append("authority.separate_authorization_required is invalid")
+    errors.extend(unknown_fields(
+        authority,
+        {"local_unprivileged_controls", "separate_authorization_required"},
+        "authority",
+    ))
+    errors.extend(unknown_fields(
+        audit, {"required_stages", "independent_authorities", "authorities"}, "audit_policy",
+    ))
     stages = audit.get("required_stages")
     if not isinstance(stages, list) or not stages or any(s not in AUDIT_STAGES for s in stages):
         errors.append("audit_policy.required_stages contains invalid or missing stages")
-    if audit.get("independent_actors") is not True:
-        errors.append("audit_policy.independent_actors must be true")
-    if not isinstance(development_policy.get("active_campaign"), (dict, type(None))):
-        errors.append("development_policy.active_campaign must be an object or null")
+    if audit.get("independent_authorities") is not True:
+        errors.append("audit_policy.independent_authorities must be true")
+    authorities = audit.get("authorities")
+    authority_ids: set[str] = set()
+    covered_stages: set[str] = set()
+    if not isinstance(authorities, list) or not authorities:
+        errors.append("audit_policy.authorities must be a non-empty array")
+    else:
+        for index, authority_record in enumerate(authorities):
+            path = f"audit_policy.authorities[{index}]"
+            if not isinstance(authority_record, dict):
+                errors.append(f"{path} must be an object")
+                continue
+            errors.extend(unknown_fields(
+                authority_record,
+                {"id", "kind", "identity_ref", "owner", "allowed_stages"},
+                path,
+            ))
+            authority_id = authority_record.get("id")
+            if not isinstance(authority_id, str) or not authority_id:
+                errors.append(f"{path}.id is required")
+            elif authority_id in authority_ids:
+                errors.append(f"duplicate audit authority id: {authority_id}")
+            else:
+                authority_ids.add(authority_id)
+            if authority_record.get("kind") not in {"virtual_role", "human", "ci", "external"}:
+                errors.append(f"{path}.kind is invalid")
+            for field in ("identity_ref", "owner"):
+                if not isinstance(authority_record.get(field), str) or not authority_record[field].strip():
+                    errors.append(f"{path}.{field} is required")
+            allowed = authority_record.get("allowed_stages")
+            if not non_empty_strings(allowed) or not set(allowed) <= AUDIT_STAGES:
+                errors.append(f"{path}.allowed_stages is invalid")
+            else:
+                covered_stages.update(allowed)
+    errors.extend(unknown_fields(
+        development_policy, {"active_campaign"}, "development_policy",
+    ))
+    campaign = development_policy.get("active_campaign")
+    if campaign is not None:
+        errors.extend(validate_campaign(campaign, control_ids))
+    elif project.get("development_mode") == "ai_brownfield":
+        # Initialization may create an inactive framework, but no task/phase outcome
+        # is reachable until a complete campaign is registered.
+        pass
     for claim_kind in ("task", "phase", "project", "release"):
         policy = claim_policies.get(claim_kind)
         if not isinstance(policy, dict):
             errors.append(f"claim_policies.{claim_kind} must be an object")
             continue
+        errors.extend(unknown_fields(
+            policy, {"required_stages"}, f"claim_policies.{claim_kind}",
+        ))
         claim_stages = policy.get("required_stages")
         if not isinstance(claim_stages, list) or not claim_stages or any(
             stage not in AUDIT_STAGES for stage in claim_stages
         ):
             errors.append(f"claim_policies.{claim_kind}.required_stages is invalid")
+        elif not set(claim_stages) <= covered_stages:
+            errors.append(f"claim_policies.{claim_kind} requires an unassigned audit stage")
     return errors
 
 
@@ -258,6 +522,9 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
         if not isinstance(capability, dict):
             errors.append(f"{prefix} must be an object")
             continue
+        errors.extend(unknown_fields(
+            capability, {"id", "owner", "authorization_required", "preflight"}, prefix,
+        ))
         capability_id = capability.get("id")
         if not isinstance(capability_id, str) or not capability_id:
             errors.append(f"{prefix}.id is required")
@@ -271,13 +538,22 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
         if not isinstance(preflight, dict):
             errors.append(f"{prefix}.preflight must be an object")
         else:
+            errors.extend(unknown_fields(
+                preflight, {"command", "cwd", "timeout_seconds"}, f"{prefix}.preflight",
+            ))
             command = preflight.get("command")
             if not isinstance(command, list) or not command or not all(
                 isinstance(part, str) and part for part in command
             ):
                 errors.append(f"{prefix}.preflight.command must be a non-empty argv list")
+            if not safe_relative_path(preflight.get("cwd", ".")):
+                errors.append(f"{prefix}.preflight.cwd must be project-relative")
         if not isinstance(capability.get("authorization_required"), bool):
             errors.append(f"{prefix}.authorization_required must be boolean")
+        if capability_id in {
+            "root", "cap_bpf", "secret", "external_service", "remote_ci", "device", "gpu",
+        } and capability.get("authorization_required") is not True:
+            errors.append(f"{prefix} privileged/external capability must require authorization")
 
     seen: set[str] = set()
     for index, control in enumerate(controls):
@@ -285,6 +561,19 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
         if not isinstance(control, dict):
             errors.append(f"{prefix} must be an object")
             continue
+        errors.extend(unknown_fields(
+            control,
+            {
+                "id", "control_revision", "rule_refs", "title", "dimension",
+                "source_standard", "source_version", "project_requirement",
+                "requirement_ids", "risk", "risk_ids", "verification_ids", "owner",
+                "applies", "applicability_rationale", "applicability_confirmed_by",
+                "applicability_exemption_ref", "required_from_maturity", "scope",
+                "evaluation_mode", "ratchet_policy", "required_capability_refs",
+                "execution", "evidence_required", "manual_evidence",
+            },
+            prefix,
+        ))
         control_id = control.get("id")
         if not isinstance(control_id, str) or not control_id:
             errors.append(f"{prefix}.id is required")
@@ -303,10 +592,31 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
                 errors.append(f"{prefix}.{field} must be a non-empty string list")
         if not isinstance(control.get("control_revision"), str) or not control.get("control_revision"):
             errors.append(f"{prefix}.control_revision is required")
-        if not isinstance(control.get("rule_refs"), list):
-            errors.append(f"{prefix}.rule_refs must be an array")
+        if not isinstance(control.get("rule_refs"), list) or any(
+            not isinstance(ref, str) or not ref for ref in control.get("rule_refs", [])
+        ):
+            errors.append(f"{prefix}.rule_refs must be a string array")
+        if not non_empty_strings(control.get("scope")) or any(
+            not safe_relative_path(path) for path in control.get("scope", [])
+        ):
+            errors.append(f"{prefix}.scope must contain project-relative paths")
         if control.get("evaluation_mode") not in {"absolute", "ratchet_delta"}:
             errors.append(f"{prefix}.evaluation_mode is invalid")
+        ratchet_policy = control.get("ratchet_policy")
+        if control.get("evaluation_mode") == "ratchet_delta":
+            if not isinstance(ratchet_policy, dict):
+                errors.append(f"{prefix}.ratchet_policy is required for ratchet_delta")
+            else:
+                errors.extend(unknown_fields(
+                    ratchet_policy, {"baseline_ref", "observation_path"},
+                    f"{prefix}.ratchet_policy",
+                ))
+                if not isinstance(ratchet_policy.get("baseline_ref"), str) or not ratchet_policy["baseline_ref"]:
+                    errors.append(f"{prefix}.ratchet_policy.baseline_ref is required")
+                if not safe_relative_path(ratchet_policy.get("observation_path")):
+                    errors.append(f"{prefix}.ratchet_policy.observation_path must be project-relative")
+        elif ratchet_policy is not None:
+            errors.append(f"{prefix}.ratchet_policy is only valid for ratchet_delta")
         if not isinstance(control.get("required_capability_refs"), list):
             errors.append(f"{prefix}.required_capability_refs must be an array")
         else:
@@ -328,24 +638,239 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
                 errors.append(f"{prefix}.applicability_rationale is required when applies=false")
             if not isinstance(confirmer, str) or not confirmer.strip():
                 errors.append(f"{prefix}.applicability_confirmed_by is required when applies=false")
+            if not isinstance(control.get("applicability_exemption_ref"), str) or not control["applicability_exemption_ref"]:
+                errors.append(f"{prefix}.applicability_exemption_ref is required when applies=false")
         if control.get("required_from_maturity") not in MATURITY_LEVELS:
             errors.append(f"{prefix}.required_from_maturity is invalid")
         execution = control.get("execution")
         if not isinstance(execution, dict):
             errors.append(f"{prefix}.execution must be an object")
             continue
+        errors.extend(unknown_fields(
+            execution,
+            {
+                "type", "command", "path", "cwd", "timeout_seconds",
+                "artifact_paths", "authorization_required",
+            },
+            f"{prefix}.execution",
+        ))
         if execution.get("type") not in {"command", "file_exists", "file_absent", "manual", "remote", "privileged"}:
             errors.append(f"{prefix}.execution.type is invalid")
         if execution.get("type") == "command" and not isinstance(execution.get("command"), list):
             errors.append(f"{prefix}.execution.command must be an argv list")
         command = execution.get("command")
+        if command is not None and (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(part, str) and part for part in command)
+        ):
+            errors.append(f"{prefix}.execution.command must be a non-empty argv list")
         if isinstance(command, list) and tuple(command[:2]) in DEPENDENCY_MUTATION_PREFIXES:
             if execution.get("authorization_required") is not True:
                 errors.append(f"{prefix} dependency mutation must require authorization")
         if execution.get("type") in {"remote", "privileged"} and execution.get("authorization_required") is not True:
             errors.append(f"{prefix} remote/privileged execution must require authorization")
+        if not safe_relative_path(execution.get("cwd", ".")):
+            errors.append(f"{prefix}.execution.cwd must be project-relative")
+        if "path" in execution and not safe_relative_path(execution.get("path")):
+            errors.append(f"{prefix}.execution.path must be project-relative")
+        artifact_paths = execution.get("artifact_paths", [])
+        if not isinstance(artifact_paths, list) or any(
+            not safe_relative_path(path) for path in artifact_paths
+        ):
+            errors.append(f"{prefix}.execution.artifact_paths must be project-relative paths")
+        timeout = execution.get("timeout_seconds")
+        if timeout is not None and (
+            not isinstance(timeout, int) or not 1 <= timeout <= 86400
+        ):
+            errors.append(f"{prefix}.execution.timeout_seconds is invalid")
         if not isinstance(control.get("evidence_required"), list) or not control.get("evidence_required"):
             errors.append(f"{prefix}.evidence_required must be non-empty")
+        manual = control.get("manual_evidence")
+        if manual is not None:
+            manual_path = f"{prefix}.manual_evidence"
+            if not isinstance(manual, dict):
+                errors.append(f"{manual_path} must be an object")
+            else:
+                errors.extend(unknown_fields(
+                    manual,
+                    {
+                        "status", "actor", "authority_id", "evidence_ref",
+                        "evidence_sha256", "reviewed_at", "expires_at", "commit",
+                    },
+                    manual_path,
+                ))
+                if manual.get("status") != "PASS":
+                    errors.append(f"{manual_path}.status must be PASS")
+                for field in ("actor", "authority_id", "commit"):
+                    if not isinstance(manual.get(field), str) or not manual[field].strip():
+                        errors.append(f"{manual_path}.{field} is required")
+                if not safe_relative_path(manual.get("evidence_ref")):
+                    errors.append(f"{manual_path}.evidence_ref must be project-relative")
+                if not valid_sha256(manual.get("evidence_sha256")):
+                    errors.append(f"{manual_path}.evidence_sha256 must be a SHA-256 digest")
+                for field in ("reviewed_at", "expires_at"):
+                    if not valid_timestamp(manual.get(field)):
+                        errors.append(f"{manual_path}.{field} must be a timezone-aware timestamp")
+
+    baseline_ids: set[str] = set()
+    for index, baseline in enumerate(registry.get("baselines", [])):
+        prefix = f"baselines[{index}]"
+        if not isinstance(baseline, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        errors.extend(unknown_fields(
+            baseline,
+            {"id", "control_id", "revision", "source_ref", "source_sha256", "violation_count"},
+            prefix,
+        ))
+        baseline_id = baseline.get("id")
+        if not isinstance(baseline_id, str) or not baseline_id:
+            errors.append(f"{prefix}.id is required")
+        elif baseline_id in baseline_ids:
+            errors.append(f"duplicate baseline id: {baseline_id}")
+        else:
+            baseline_ids.add(baseline_id)
+        if baseline.get("control_id") not in seen:
+            errors.append(f"{prefix}.control_id references an unknown control")
+        if not isinstance(baseline.get("revision"), int) or baseline["revision"] < 1:
+            errors.append(f"{prefix}.revision must be an integer >= 1")
+        if not safe_relative_path(baseline.get("source_ref")):
+            errors.append(f"{prefix}.source_ref must be project-relative")
+        if not valid_sha256(baseline.get("source_sha256")):
+            errors.append(f"{prefix}.source_sha256 must be a SHA-256 digest")
+        if not isinstance(baseline.get("violation_count"), int) or baseline["violation_count"] < 0:
+            errors.append(f"{prefix}.violation_count must be a non-negative integer")
+
+    debt_ids: set[str] = set()
+    for index, debt in enumerate(registry.get("cleanup_debts", [])):
+        prefix = f"cleanup_debts[{index}]"
+        if not isinstance(debt, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        errors.extend(unknown_fields(
+            debt,
+            {"id", "control_id", "baseline_ref", "scope", "owner", "status", "delete_by", "rationale"},
+            prefix,
+        ))
+        debt_id = debt.get("id")
+        if not isinstance(debt_id, str) or not debt_id:
+            errors.append(f"{prefix}.id is required")
+        elif debt_id in debt_ids:
+            errors.append(f"duplicate cleanup debt id: {debt_id}")
+        else:
+            debt_ids.add(debt_id)
+        if debt.get("control_id") not in seen:
+            errors.append(f"{prefix}.control_id references an unknown control")
+        if debt.get("baseline_ref") not in baseline_ids:
+            errors.append(f"{prefix}.baseline_ref references an unknown baseline")
+        if not non_empty_strings(debt.get("scope")):
+            errors.append(f"{prefix}.scope must be a non-empty string list")
+        if not isinstance(debt.get("owner"), str) or not debt["owner"].strip():
+            errors.append(f"{prefix}.owner is required")
+        if debt.get("status") not in DEBT_STATUSES:
+            errors.append(f"{prefix}.status is invalid")
+        if not valid_timestamp(debt.get("delete_by")):
+            errors.append(f"{prefix}.delete_by must be a timezone-aware timestamp")
+        if not isinstance(debt.get("rationale"), str) or not debt["rationale"].strip():
+            errors.append(f"{prefix}.rationale is required")
+
+    exemption_ids: set[str] = set()
+    for index, exemption in enumerate(registry.get("design_scope_exemptions", [])):
+        prefix = f"design_scope_exemptions[{index}]"
+        if not isinstance(exemption, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        errors.extend(unknown_fields(
+            exemption,
+            {
+                "id", "control_id", "scope", "owner", "rationale",
+                "alternative_control_refs", "status", "reviewed_at", "review_by",
+            },
+            prefix,
+        ))
+        exemption_id = exemption.get("id")
+        if not isinstance(exemption_id, str) or not exemption_id:
+            errors.append(f"{prefix}.id is required")
+        elif exemption_id in exemption_ids:
+            errors.append(f"duplicate design exemption id: {exemption_id}")
+        else:
+            exemption_ids.add(exemption_id)
+        if exemption.get("control_id") not in seen:
+            errors.append(f"{prefix}.control_id references an unknown control")
+        if not non_empty_strings(exemption.get("scope")):
+            errors.append(f"{prefix}.scope must be a non-empty string list")
+        for field in ("owner", "rationale"):
+            if not isinstance(exemption.get(field), str) or not exemption[field].strip():
+                errors.append(f"{prefix}.{field} is required")
+        alternatives = exemption.get("alternative_control_refs")
+        if not non_empty_strings(alternatives):
+            errors.append(f"{prefix}.alternative_control_refs must be a non-empty string list")
+        elif not set(alternatives) <= seen:
+            errors.append(f"{prefix}.alternative_control_refs contains unknown controls")
+        if exemption.get("status") not in EXEMPTION_STATUSES:
+            errors.append(f"{prefix}.status is invalid")
+        for field in ("reviewed_at", "review_by"):
+            if not valid_timestamp(exemption.get(field)):
+                errors.append(f"{prefix}.{field} must be a timezone-aware timestamp")
+
+    rule_ids: set[str] = set()
+    for index, mapping in enumerate(registry.get("federated_rule_mappings", [])):
+        prefix = f"federated_rule_mappings[{index}]"
+        if not isinstance(mapping, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        errors.extend(unknown_fields(
+            mapping,
+            {
+                "rule_id", "source_ref", "source_sha256", "semantic_owner",
+                "control_refs", "mandatory", "status", "observed_at", "reviewed_at",
+            },
+            prefix,
+        ))
+        rule_id = mapping.get("rule_id")
+        if not isinstance(rule_id, str) or not rule_id:
+            errors.append(f"{prefix}.rule_id is required")
+        elif rule_id in rule_ids:
+            errors.append(f"duplicate federated rule id: {rule_id}")
+        else:
+            rule_ids.add(rule_id)
+        if not safe_relative_path(mapping.get("source_ref")):
+            errors.append(f"{prefix}.source_ref must be project-relative")
+        if not valid_sha256(mapping.get("source_sha256")):
+            errors.append(f"{prefix}.source_sha256 must be a SHA-256 digest")
+        if not isinstance(mapping.get("semantic_owner"), str) or not mapping["semantic_owner"].strip():
+            errors.append(f"{prefix}.semantic_owner is required")
+        refs = mapping.get("control_refs")
+        if mapping.get("status") == "unmapped":
+            if refs not in ([], None):
+                errors.append(f"{prefix}.control_refs must be empty when status=unmapped")
+        elif not non_empty_strings(refs) or not set(refs) <= seen:
+            errors.append(f"{prefix}.control_refs must reference known controls")
+        if not isinstance(mapping.get("mandatory"), bool):
+            errors.append(f"{prefix}.mandatory must be boolean")
+        if mapping.get("status") not in FEDERATION_STATUSES:
+            errors.append(f"{prefix}.status is invalid")
+        if not valid_timestamp(mapping.get("observed_at")):
+            errors.append(f"{prefix}.observed_at must be a timezone-aware timestamp")
+        reviewed_at = mapping.get("reviewed_at")
+        if mapping.get("status") == "unmapped":
+            if reviewed_at is not None:
+                errors.append(f"{prefix}.reviewed_at must be null when status=unmapped")
+        elif not valid_timestamp(reviewed_at):
+            errors.append(f"{prefix}.reviewed_at must be a timezone-aware timestamp")
+
+    for index, control in enumerate(controls):
+        if (
+            control.get("applies") is False
+            and control.get("applicability_exemption_ref") not in exemption_ids
+        ):
+            errors.append(f"controls[{index}].applicability_exemption_ref references an unknown exemption")
+        if control.get("evaluation_mode") != "ratchet_delta":
+            continue
+        baseline_ref = control.get("ratchet_policy", {}).get("baseline_ref")
+        if baseline_ref not in baseline_ids:
+            errors.append(f"controls[{index}].ratchet_policy.baseline_ref references an unknown baseline")
     return errors
 
 
@@ -374,7 +899,39 @@ def validate_traceability(graph: dict[str, Any], registry: dict[str, Any]) -> li
     return errors
 
 
-def validate_ledger(ledger: dict[str, Any]) -> list[str]:
+def _validate_hash_chain(entries: Any, collection: str) -> list[str]:
+    if not isinstance(entries, list):
+        return [f"evidence ledger {collection} must be an array"]
+    errors: list[str] = []
+    previous = "GENESIS"
+    seen: set[str] = set()
+    identity_field = {
+        "runs": "run_id", "audits": "audit_id", "claims": "claim_id",
+    }[collection]
+    for index, entry in enumerate(entries):
+        prefix = f"{collection}[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        identity = entry.get(identity_field)
+        if not isinstance(identity, str) or not identity:
+            errors.append(f"{prefix}.{identity_field} is required")
+        elif identity in seen:
+            errors.append(f"duplicate {identity_field}: {identity}")
+        else:
+            seen.add(identity)
+        if entry.get("previous_entry_sha256") != previous:
+            errors.append(f"{prefix} breaks the evidence hash chain")
+        claimed = entry.get("entry_sha256")
+        payload = dict(entry)
+        payload.pop("entry_sha256", None)
+        if claimed != canonical_digest(payload):
+            errors.append(f"{prefix}.entry_sha256 does not match its content")
+        previous = claimed if isinstance(claimed, str) else "INVALID"
+    return errors
+
+
+def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[str]:
     errors: list[str] = []
     errors.extend(unknown_fields(
         ledger, {"schema_version", "runs", "audits", "claims"}, "ledger",
@@ -382,37 +939,136 @@ def validate_ledger(ledger: dict[str, Any]) -> list[str]:
     if ledger.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"evidence ledger schema_version must be {SCHEMA_VERSION}; regenerate the v2 control plane")
     runs = ledger.get("runs")
+    errors.extend(_validate_hash_chain(runs, "runs"))
+    errors.extend(_validate_hash_chain(ledger.get("audits"), "audits"))
+    errors.extend(_validate_hash_chain(ledger.get("claims"), "claims"))
     if not isinstance(runs, list):
-        return errors + ["evidence ledger runs must be an array"]
-    if not isinstance(ledger.get("audits"), list):
-        errors.append("evidence ledger audits must be an array")
-    if not isinstance(ledger.get("claims"), list):
-        errors.append("evidence ledger claims must be an array")
-    previous = "GENESIS"
-    seen: set[str] = set()
+        return errors
     for index, run in enumerate(runs):
         prefix = f"runs[{index}]"
         if not isinstance(run, dict):
-            errors.append(f"{prefix} must be an object")
             continue
-        run_id = run.get("run_id")
-        if not isinstance(run_id, str) or not run_id:
-            errors.append(f"{prefix}.run_id is required")
-        elif run_id in seen:
-            errors.append(f"duplicate run_id: {run_id}")
-        else:
-            seen.add(run_id)
-        if run.get("previous_entry_sha256") != previous:
-            errors.append(f"{prefix} breaks the evidence hash chain")
-        claimed = run.get("entry_sha256")
-        payload = dict(run)
-        payload.pop("entry_sha256", None)
-        actual = canonical_digest(payload)
-        if claimed != actual:
-            errors.append(f"{prefix}.entry_sha256 does not match its content")
-        previous = claimed if isinstance(claimed, str) else "INVALID"
         if run.get("conclusion") not in {"PASS", "FAIL", "BLOCKED", "DISPUTED"}:
             errors.append(f"{prefix}.conclusion is invalid")
         if not isinstance(run.get("workspace_sha256"), str) or len(run["workspace_sha256"]) != 64:
             errors.append(f"{prefix}.workspace_sha256 is invalid")
+        for field in ("actor", "authority_id", "execution_context"):
+            if not isinstance(run.get(field), str) or not run[field].strip():
+                errors.append(f"{prefix}.{field} is required")
+        if run.get("audit_stage") not in AUDIT_STAGES:
+            errors.append(f"{prefix}.audit_stage is invalid")
+        reviewed = run.get("reviewed_run_ids")
+        if not isinstance(reviewed, list) or any(not isinstance(item, str) or not item for item in reviewed):
+            errors.append(f"{prefix}.reviewed_run_ids must be a string array")
+        if run.get("audit_stage") != "self" and not reviewed:
+            errors.append(f"{prefix}.reviewed_run_ids is required for independent audit")
+        for result_index, result in enumerate(run.get("results", [])):
+            if not isinstance(result, dict):
+                errors.append(f"{prefix}.results[{result_index}] must be an object")
+                continue
+            output_ref = result.get("output_ref")
+            output_digest = result.get("output_sha256")
+            if output_ref is None and output_digest is None:
+                continue
+            if not safe_relative_path(output_ref) or not valid_sha256(output_digest):
+                errors.append(f"{prefix}.results[{result_index}] has invalid output evidence binding")
+                continue
+            if root is not None:
+                output_path = path_inside_root(root, output_ref)
+                if output_path is None or not output_path.is_file():
+                    errors.append(f"{prefix}.results[{result_index}] output evidence is missing")
+                else:
+                    digest = file_sha256(output_path)
+                    if digest != output_digest:
+                        errors.append(f"{prefix}.results[{result_index}] output evidence digest mismatch")
+            debt_observation = result.get("debt_observation")
+            if isinstance(debt_observation, dict):
+                observation_ref = debt_observation.get("observation_ref")
+                observation_digest = debt_observation.get("observation_sha256")
+                if not safe_relative_path(observation_ref) or not valid_sha256(observation_digest):
+                    errors.append(f"{prefix}.results[{result_index}] has invalid debt observation binding")
+                elif root is not None:
+                    observation_path = path_inside_root(root, observation_ref)
+                    if observation_path is None or not observation_path.is_file():
+                        errors.append(f"{prefix}.results[{result_index}] debt observation is missing")
+                    elif file_sha256(observation_path) != observation_digest:
+                        errors.append(f"{prefix}.results[{result_index}] debt observation digest mismatch")
+            artifacts = result.get("artifacts", [])
+            if not isinstance(artifacts, list):
+                errors.append(f"{prefix}.results[{result_index}].artifacts must be an array")
+            else:
+                for artifact_index, artifact in enumerate(artifacts):
+                    artifact_prefix = f"{prefix}.results[{result_index}].artifacts[{artifact_index}]"
+                    if (
+                        not isinstance(artifact, dict)
+                        or not safe_relative_path(artifact.get("path"))
+                        or not valid_sha256(artifact.get("sha256"))
+                        or not isinstance(artifact.get("bytes"), int)
+                    ):
+                        errors.append(f"{artifact_prefix} has an invalid evidence binding")
+    runs_by_id = {
+        run.get("run_id"): run for run in runs
+        if isinstance(run, dict) and isinstance(run.get("run_id"), str)
+    }
+    predecessor = {
+        "cross": "self", "release_authority": "cross", "third_party": "release_authority",
+    }
+    for index, run in enumerate(runs):
+        if not isinstance(run, dict) or run.get("audit_stage") == "self":
+            continue
+        prefix = f"runs[{index}]"
+        for reviewed_id in run.get("reviewed_run_ids", []):
+            source = runs_by_id.get(reviewed_id)
+            if source is None:
+                errors.append(f"{prefix}.reviewed_run_ids references an unknown run")
+                continue
+            if source.get("audit_stage") != predecessor.get(run.get("audit_stage")):
+                errors.append(f"{prefix} reviews the wrong predecessor stage")
+            if source.get("authority_id") == run.get("authority_id"):
+                errors.append(f"{prefix} reuses the reviewed authority identity")
+            if source.get("execution_context") == run.get("execution_context"):
+                errors.append(f"{prefix} reuses the reviewed execution context")
+    for index, audit in enumerate(ledger.get("audits", [])):
+        if not isinstance(audit, dict):
+            continue
+        prefix = f"audits[{index}]"
+        if audit.get("audit_stage") not in AUDIT_STAGES - {"self"}:
+            errors.append(f"{prefix}.audit_stage must be an independent stage")
+        if audit.get("conclusion") not in {"PASS", "FAIL", "BLOCKED", "DISPUTED"}:
+            errors.append(f"{prefix}.conclusion is invalid")
+        if not non_empty_strings(audit.get("reviewed_run_ids")):
+            errors.append(f"{prefix}.reviewed_run_ids must be non-empty")
+        elif not set(audit["reviewed_run_ids"]) <= set(runs_by_id):
+            errors.append(f"{prefix}.reviewed_run_ids references unknown runs")
+        audited_run = runs_by_id.get(audit.get("run_id"))
+        if audited_run is None:
+            errors.append(f"{prefix}.run_id references an unknown run")
+        elif any(
+            audit.get(field) != audited_run.get(field)
+            for field in ("audit_stage", "authority_id", "execution_context", "conclusion")
+        ):
+            errors.append(f"{prefix} does not match its audit run")
+    for index, claim in enumerate(ledger.get("claims", [])):
+        if not isinstance(claim, dict):
+            continue
+        prefix = f"claims[{index}]"
+        if claim.get("claim_scope") not in CLAIM_SCOPES:
+            errors.append(f"{prefix}.claim_scope is invalid")
+        if claim.get("outcome") not in {"COMPLETED", "PASS"}:
+            errors.append(f"{prefix}.outcome is invalid")
+        if not non_empty_strings(claim.get("control_ids")):
+            errors.append(f"{prefix}.control_ids must be non-empty")
+        supporting = claim.get("supporting_run_ids")
+        if not non_empty_strings(supporting) or not set(supporting) <= set(runs_by_id):
+            errors.append(f"{prefix}.supporting_run_ids references unknown runs")
+            continue
+        for run_id in supporting:
+            run = runs_by_id[run_id]
+            if any(
+                claim.get(field) != run.get(field)
+                for field in ("commit", "workspace_sha256", "registry_sha256", "target_maturity")
+            ):
+                errors.append(f"{prefix} has stale supporting run {run_id}")
+            if run.get("audit_stage") not in claim.get("audit_stages", []):
+                errors.append(f"{prefix} includes a run from an undeclared audit stage")
     return errors

@@ -874,7 +874,7 @@ def build_index(scan: dict) -> str:
         "",
         "## At a glance",
         f"- Languages: {', '.join(languages) or 'unknown'} · CI: {yes(ci)} · Tests sampled: {len(scan.get('test_files_sample', []))} · Release artifacts: {yes(evidence.get('release'))}",
-        f"- **Profile: classify yourself** from [profile.md](profile.md) (README excerpt + dependencies) — the scanner does not guess.",
+        "- **Profile: classify yourself** from [profile.md](profile.md) (README excerpt + dependencies) — the scanner does not guess.",
         "",
         "## Non-negotiables (always hold)",
         "- **Evidence over claims** — no completion / mergeable / release-ready claim without code path + commit + CI/manual evidence.",

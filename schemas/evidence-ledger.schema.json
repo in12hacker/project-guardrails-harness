@@ -10,7 +10,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["run_id", "timestamp", "commit", "workspace_sha256", "target_maturity", "registry_sha256", "selected_control_ids", "audit_stage", "results", "conclusion", "previous_entry_sha256", "entry_sha256"],
+        "required": ["run_id", "timestamp", "commit", "workspace_sha256", "target_maturity", "registry_sha256", "selected_control_ids", "audit_stage", "actor", "authority_id", "execution_context", "reviewed_run_ids", "reviewed_evidence_sha256", "results", "conclusion", "previous_entry_sha256", "entry_sha256"],
         "properties": {
           "run_id": {"type": "string"},
           "timestamp": {"type": "string", "format": "date-time"},
@@ -20,6 +20,11 @@
           "registry_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
           "selected_control_ids": {"type": "array", "items": {"type": "string"}},
           "audit_stage": {"enum": ["self", "cross", "release_authority", "third_party"]},
+          "actor": {"type": "string", "minLength": 1},
+          "authority_id": {"type": "string", "minLength": 1},
+          "execution_context": {"type": "string", "minLength": 1},
+          "reviewed_run_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "reviewed_evidence_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
           "results": {"type": "array"},
           "conclusion": {"enum": ["PASS", "FAIL", "BLOCKED", "DISPUTED"]},
           "previous_entry_sha256": {"type": "string"},
@@ -28,8 +33,53 @@
         "additionalProperties": true
       }
     },
-    "audits": {"type": "array"},
-    "claims": {"type": "array"}
+    "audits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["audit_id", "timestamp", "audit_stage", "run_id", "reviewed_run_ids", "authority_id", "execution_context", "reviewed_evidence_sha256", "conclusion", "previous_entry_sha256", "entry_sha256"],
+        "properties": {
+          "audit_id": {"type": "string", "minLength": 1},
+          "timestamp": {"type": "string", "format": "date-time"},
+          "audit_stage": {"enum": ["cross", "release_authority", "third_party"]},
+          "run_id": {"type": "string", "minLength": 1},
+          "reviewed_run_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "authority_id": {"type": "string", "minLength": 1},
+          "execution_context": {"type": "string", "minLength": 1},
+          "reviewed_evidence_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+          "conclusion": {"enum": ["PASS", "FAIL", "BLOCKED", "DISPUTED"]},
+          "previous_entry_sha256": {"type": "string"},
+          "entry_sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+        },
+        "additionalProperties": false
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "timestamp", "claim_scope", "outcome", "commit", "workspace_sha256", "registry_sha256", "target_maturity", "control_ids", "audit_stages", "stage_authorities", "stage_contexts", "supporting_run_ids", "campaign", "previous_entry_sha256", "entry_sha256"],
+        "properties": {
+          "claim_id": {"type": "string", "minLength": 1},
+          "timestamp": {"type": "string", "format": "date-time"},
+          "claim_scope": {"enum": ["task", "phase", "project", "release"]},
+          "outcome": {"enum": ["COMPLETED", "PASS"]},
+          "commit": {"type": "string", "minLength": 1},
+          "workspace_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+          "registry_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+          "target_maturity": {"type": "string", "minLength": 1},
+          "control_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "audit_stages": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "stage_authorities": {"type": "object"},
+          "stage_contexts": {"type": "object"},
+          "supporting_run_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "campaign": {"type": ["object", "null"]},
+          "previous_entry_sha256": {"type": "string"},
+          "entry_sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+        },
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": false
 }

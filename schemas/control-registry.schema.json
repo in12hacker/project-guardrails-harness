@@ -31,11 +31,22 @@
           "owner": {"type": "string", "minLength": 1},
           "applies": {"type": "boolean"},
           "applicability_rationale": {"type": "string"},
+          "applicability_confirmed_by": {"type": "string"},
+          "applicability_exemption_ref": {"type": "string"},
           "required_from_maturity": {
             "enum": ["prototype", "engineering_ready", "production_ready", "commercial_ready", "regulated_ready"]
           },
           "scope": {"type": "array", "items": {"type": "string"}},
           "evaluation_mode": {"enum": ["absolute", "ratchet_delta"]},
+          "ratchet_policy": {
+            "type": "object",
+            "required": ["baseline_ref", "observation_path"],
+            "properties": {
+              "baseline_ref": {"type": "string", "minLength": 1},
+              "observation_path": {"type": "string", "minLength": 1}
+            },
+            "additionalProperties": false
+          },
           "required_capability_refs": {"type": "array", "items": {"type": "string"}},
           "execution": {
             "type": "object",
@@ -49,11 +60,26 @@
               "artifact_paths": {"type": "array", "items": {"type": "string"}},
               "authorization_required": {"type": "boolean"}
             },
-            "additionalProperties": true
+            "additionalProperties": false
           },
-          "evidence_required": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+          "evidence_required": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "manual_evidence": {
+            "type": "object",
+            "required": ["status", "actor", "authority_id", "evidence_ref", "evidence_sha256", "reviewed_at", "expires_at", "commit"],
+            "properties": {
+              "status": {"const": "PASS"},
+              "actor": {"type": "string", "minLength": 1},
+              "authority_id": {"type": "string", "minLength": 1},
+              "evidence_ref": {"type": "string", "minLength": 1},
+              "evidence_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+              "reviewed_at": {"type": "string", "format": "date-time"},
+              "expires_at": {"type": "string", "format": "date-time"},
+              "commit": {"type": "string", "minLength": 1}
+            },
+            "additionalProperties": false
+          }
         },
-        "additionalProperties": true
+        "additionalProperties": false
       }
     },
     "capabilities": {
@@ -79,10 +105,72 @@
         "additionalProperties": false
       }
     },
-    "baselines": {"type": "array"},
-    "cleanup_debts": {"type": "array"},
-    "design_scope_exemptions": {"type": "array"},
-    "federated_rule_mappings": {"type": "array"}
+    "baselines": {"type": "array", "items": {"$ref": "#/$defs/baseline"}},
+    "cleanup_debts": {"type": "array", "items": {"$ref": "#/$defs/cleanupDebt"}},
+    "design_scope_exemptions": {"type": "array", "items": {"$ref": "#/$defs/designScopeExemption"}},
+    "federated_rule_mappings": {"type": "array", "items": {"$ref": "#/$defs/federatedRuleMapping"}}
+  },
+  "$defs": {
+    "baseline": {
+      "type": "object",
+      "required": ["id", "control_id", "revision", "source_ref", "source_sha256", "violation_count"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "control_id": {"type": "string", "minLength": 1},
+        "revision": {"type": "integer", "minimum": 1},
+        "source_ref": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+        "violation_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "cleanupDebt": {
+      "type": "object",
+      "required": ["id", "control_id", "baseline_ref", "scope", "owner", "status", "delete_by", "rationale"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "control_id": {"type": "string", "minLength": 1},
+        "baseline_ref": {"type": "string", "minLength": 1},
+        "scope": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "owner": {"type": "string", "minLength": 1},
+        "status": {"enum": ["open", "closed"]},
+        "delete_by": {"type": "string", "format": "date-time"},
+        "rationale": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "designScopeExemption": {
+      "type": "object",
+      "required": ["id", "control_id", "scope", "owner", "rationale", "alternative_control_refs", "status", "reviewed_at", "review_by"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "control_id": {"type": "string", "minLength": 1},
+        "scope": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "owner": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "alternative_control_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "status": {"enum": ["active", "expired", "revoked"]},
+        "reviewed_at": {"type": "string", "format": "date-time"},
+        "review_by": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "federatedRuleMapping": {
+      "type": "object",
+      "required": ["rule_id", "source_ref", "source_sha256", "semantic_owner", "control_refs", "mandatory", "status", "observed_at", "reviewed_at"],
+      "properties": {
+        "rule_id": {"type": "string", "minLength": 1},
+        "source_ref": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+        "semantic_owner": {"type": "string", "minLength": 1},
+        "control_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "mandatory": {"type": "boolean"},
+        "status": {"enum": ["current", "stale", "disputed", "unmapped"]},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "reviewed_at": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

@@ -122,6 +122,13 @@ non-applicability for exact scope with an alternative safety control and review
 lifecycle. Risk acceptance is a fourth business decision and never changes a
 control status.
 
+The executable `DebtObservation` contains baseline reference, revision, source
+digest, baseline/current/new/fixed counts, and the observation artifact digest.
+Counts must satisfy `current = baseline - fixed + new`. An overdue open debt
+blocks further task/phase outcomes until its lifecycle is reviewed. An
+`applies=false` control must reference an active, unexpired
+`DesignScopeExemption`; rationale text alone is insufficient.
+
 Guidance:
 
 - design-scope exemptions live near the code or rule with a reason;

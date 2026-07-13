@@ -50,6 +50,10 @@ Control:
   rationale:
   required_from_maturity:
   scope:
+  evaluation_mode: absolute|ratchet_delta
+  ratchet_policy:                 # required only for ratchet_delta
+    baseline_ref:
+    observation_path:
   execution:
     type: command|file_exists|manual|remote|privileged
     command:
@@ -77,13 +81,27 @@ same-tier or semantic-owner conflict makes it `disputed`. A disputed mapping
 emits `BLOCKED` with `blocker_kind=policy_conflict`; an unmapped mandatory
 project rule is a framework failure.
 
+Initialization inventories detected project instruction sources as mandatory
+`unmapped` records with source digest and observation time. It does not parse or
+copy their rules. A project owner maps each source to semantic owner and control
+references, records review time, and changes status through a reviewed registry
+edit. Until then, runs may collect evidence but claims remain blocked.
+
+`ratchet_delta` commands write one JSON observation at `observation_path` with
+`baseline_ref`, baseline revision/digest/count, `current_count`, `new_count`, and
+`fixed_count`. The evaluator verifies `current = baseline - fixed + new`. Open
+debt keeps the control `FAIL`; only a registered task/phase exit policy may use
+the immutable delta to produce `COMPLETED`. Project/release evaluation never uses
+the ratchet exception.
+
 Current status and `last_verified` are derived from the evidence ledger for the
 requested commit, workspace, scope, registry version, maturity, and audit stage.
 They are never hand-maintained in the registry.
 
 ## Evidence Ledger
 
-The ledger contains append-only, hash-chained evidence records. It records the
+The ledger contains separate append-only, hash-chained run, audit, and claim
+records. It records the
 repository revision, full tracked/unignored workspace digest, registry digest,
 environment, tool versions, command, exit code, timestamps, output digest,
 artifact digest, status, and audit stage. Summaries are not evidence unless
@@ -96,6 +114,11 @@ provisional until a current verifier confirms matching control, scope, input,
 dependency, environment, and artifact digests. Cross-audit must be able to read
 the original redacted output, not only its digest. Privileged, manual, or
 external evidence must carry an explicit freshness policy and expiry.
+
+Persisted output is content-addressed and verified again before every run or
+claim. The ledger stores a full-stream digest/byte count plus a bounded redacted
+review copy, its digest, and an explicit truncation flag. Missing or modified
+review output is a framework integrity failure.
 
 ## Traceability Graph
 

@@ -11,7 +11,7 @@ evidence, and refuse completion or release claims that are not proven.
 
 Use it when asked to:
 
-- initialize or migrate a project-wide quality framework,
+- initialize or regenerate a v2 project-wide quality framework,
 - create and execute engineering, product, operations, and release controls,
 - trace requirements through risks, tests, controls, evidence, and outcomes,
 - perform self-audit, independent cross-audit, and release authorization,
@@ -39,7 +39,8 @@ Use it when asked to:
 └── scripts/
     ├── scan_project.py      # collect repo evidence → JSON
     ├── render_guardrails.py # render human guidance
-    ├── init_quality_framework.py # create/migrate .guardrails
+    ├── init_quality_framework.py # create a v2 .guardrails control plane
+    ├── register_campaign.py # bind an AI brownfield campaign to current v2 evidence
     ├── sync_traceability.py # regenerate the derived traceability graph
     └── evaluate_quality.py  # execute controls and enforce claims
 ```
@@ -100,11 +101,13 @@ stdlib-only gate runner from detected project-owned commands and a pinned,
 least-privilege GitHub Actions entry point without installing dependencies or
 overwriting an existing workflow of the same name.
 
-Run local controls and record evidence, then evaluate a claim:
+Run local controls with stable authority/context identities, bind each independent
+stage to the evidence it reviewed, then evaluate a claim:
 
 ```bash
 python3 scripts/evaluate_quality.py --root /path/to/project --run \
-  --audit-stage self --actor codex
+  --audit-stage self --actor codex --authority-id virtual:developer \
+  --execution-context local-session-id
 python3 scripts/evaluate_quality.py --root /path/to/project --claim
 ```
 
@@ -112,6 +115,13 @@ The second command must fail while any applicable control or required audit
 stage is not current `PASS` for the assessed commit and scope.
 For human brownfield work, a scoped task claim uses `--claim-scope task` plus
 every affected `--control`; it never changes whole-project readiness.
+
+AI brownfield work first registers a reviewed campaign JSON specification with
+`register_campaign.py`. Task and phase claims then identify the exact campaign
+revision and phase/task. Ratchet observations may support scoped completion while
+the underlying debt control remains `FAIL`; project and release claims remain
+absolute. This repository intentionally implements v2 only and carries no v1
+reader or compatibility branch.
 
 ## License
 

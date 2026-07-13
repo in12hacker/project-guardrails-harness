@@ -32,6 +32,16 @@ Cross-audit re-evaluates the self-audit's original redacted evidence and its
 bindings. Merely rerunning a command under another label or reading only a
 summary does not establish an independent conclusion.
 
+The executable protocol enforces this with three separate bindings: `actor` is
+only a display label, `authority_id` identifies a manifest-registered responsible authority, and
+`execution_context` identifies the session/runner/organization boundary.
+Independent stages must use distinct authority and context values and cite the
+immediately preceding stage through `reviewed_run_ids`. One-person projects may
+register separate virtual-team responsibilities; commercial profiles should map
+them to organizational or external identities. The referenced run,
+content-addressed review output, commit, workspace, registry, scope, and control
+set are revalidated before execution. A changed conclusion becomes `DISPUTED`.
+
 ## Authorization Boundary
 
 Local non-privileged controls may run automatically. The following require

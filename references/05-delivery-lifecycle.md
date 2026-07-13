@@ -123,6 +123,13 @@ phase. A material change to the baseline, assessed scope, target maturity,
 registry, ordering, or exit criteria requires a campaign revision and
 invalidates affected outcomes.
 
+Each registered phase and task declares `affected_control_ids`, `assessed_scope`,
+and an exit policy containing `max_new_violations`,
+`minimum_fixed_violations`, and `allow_open_cleanup_debt`. The registration
+script binds the campaign to the current Git commit, workspace digest, and
+registry digest; callers cannot supply those bindings. Task/phase claims derive scope from the
+registration instead of accepting an ad hoc control subset.
+
 Human brownfield feature work may use a task claim only when all affected
 controls pass in every required audit stage and measured debt does not grow.
 Project claims never accept a selected control subset.

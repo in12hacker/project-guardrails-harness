@@ -1,0 +1,33 @@
+{
+  "id": "CAMPAIGN-ID",
+  "revision": 1,
+  "target_maturity": "engineering_ready",
+  "assessed_scope": ["."],
+  "owner": "quality-owner",
+  "phases": [
+    {
+      "id": "phase-1",
+      "title": "Registered convergence phase",
+      "affected_control_ids": ["QF.CONTROL.ID"],
+      "assessed_scope": ["."],
+      "exit_policy": {
+        "max_new_violations": 0,
+        "minimum_fixed_violations": 1,
+        "allow_open_cleanup_debt": true
+      },
+      "tasks": [
+        {
+          "id": "task-1",
+          "kind": "debt_reduction",
+          "affected_control_ids": ["QF.CONTROL.ID"],
+          "assessed_scope": ["."],
+          "exit_policy": {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 1,
+            "allow_open_cleanup_debt": true
+          }
+        }
+      ]
+    }
+  ]
+}

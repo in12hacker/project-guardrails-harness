@@ -10,6 +10,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,12 +20,14 @@ from pathlib import Path
 
 from quality_common import (
     AUDIT_STAGES,
+    CLAIM_SCOPES,
     MATURITY_LEVELS,
     canonical_digest,
     git_commit,
     git_workspace_digest,
     load_json_yaml,
     maturity_applies,
+    safe_relative_path,
     validate_manifest,
     validate_ledger,
     validate_registry,
@@ -51,7 +54,7 @@ def artifact_evidence(root: Path, execution: dict) -> tuple[list[dict], list[str
     artifacts: list[dict] = []
     missing: list[str] = []
     for raw in execution.get("artifact_paths", []):
-        path = root / raw
+        path = project_file(root, raw)
         if not path.is_file():
             missing.append(raw)
             continue
@@ -62,7 +65,7 @@ def artifact_evidence(root: Path, execution: dict) -> tuple[list[dict], list[str
 
 def redact_output(raw: bytes) -> str:
     """Return bounded evidence output with common credentials removed."""
-    text = raw[:OUTPUT_LIMIT_BYTES].decode("utf-8", errors="replace")
+    text = raw.decode("utf-8", errors="replace")
     for name, value in os.environ.items():
         if value and len(value) >= 4 and any(
             marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
@@ -77,13 +80,44 @@ def persist_output(root: Path, evidence_dir: Path, text: str) -> tuple[str, str,
     digest = hashlib.sha256(payload).hexdigest()
     evidence_dir.mkdir(parents=True, exist_ok=True)
     path = evidence_dir / f"{digest}.log"
+    if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        raise OSError(f"content-addressed evidence was modified: {path}")
     if not path.exists():
         path.write_bytes(payload)
-    try:
-        reference = path.relative_to(root).as_posix()
-    except ValueError:
-        reference = str(path)
+    reference = path.relative_to(root).as_posix()
     return reference, digest, len(payload)
+
+
+def bounded_output(path: Path) -> tuple[bytes, bool]:
+    with path.open("rb") as stream:
+        payload = stream.read(OUTPUT_LIMIT_BYTES + 1)
+    return payload[:OUTPUT_LIMIT_BYTES], len(payload) > OUTPUT_LIMIT_BYTES
+
+
+def persist_evidence_file(
+    root: Path, evidence_dir: Path, source: Path, suffix: str,
+) -> tuple[str, str, int]:
+    digest, size = digest_file(source)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    destination = evidence_dir / f"{digest}{suffix}"
+    if destination.exists():
+        existing_digest, _ = digest_file(destination)
+        if existing_digest != digest:
+            raise OSError(f"content-addressed evidence was modified: {destination}")
+    else:
+        shutil.copyfile(source, destination)
+    return destination.relative_to(root).as_posix(), digest, size
+
+
+def project_file(root: Path, relative: str) -> Path:
+    if not safe_relative_path(relative):
+        raise ValueError(f"path must be project-relative: {relative}")
+    candidate = root / relative
+    try:
+        candidate.resolve(strict=False).relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"path escapes project through a symlink: {relative}") from exc
+    return candidate
 
 
 def capability_preflight(
@@ -102,7 +136,7 @@ def capability_preflight(
             return observations, "authorization", f"capability {capability_id} requires authorization"
         preflight = capability["preflight"]
         command = preflight["command"]
-        cwd = root / preflight.get("cwd", ".")
+        cwd = project_file(root, preflight.get("cwd", "."))
         timeout = int(preflight.get("timeout_seconds", 30))
         started = time.monotonic()
         try:
@@ -110,7 +144,8 @@ def capability_preflight(
                 command,
                 cwd=cwd,
                 check=False,
-                capture_output=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 timeout=timeout,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -132,11 +167,60 @@ def capability_preflight(
     return observations, None, None
 
 
+def load_debt_observation(
+    root: Path, control: dict, baselines: dict[str, dict], evidence_dir: Path,
+) -> tuple[dict | None, str | None]:
+    policy = control.get("ratchet_policy", {})
+    baseline_ref = policy.get("baseline_ref")
+    baseline = baselines.get(baseline_ref)
+    if baseline is None:
+        return None, f"ratchet baseline is missing: {baseline_ref}"
+    try:
+        path = project_file(root, policy.get("observation_path", ""))
+        observation = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, f"ratchet observation is unavailable: {exc}"
+    required = {
+        "baseline_ref", "baseline_revision", "baseline_source_sha256",
+        "baseline_count", "current_count", "new_count", "fixed_count",
+    }
+    if not isinstance(observation, dict) or set(observation) != required:
+        return None, "ratchet observation fields do not match the v2 contract"
+    if observation["baseline_ref"] != baseline_ref:
+        return None, "ratchet observation references a different baseline"
+    if observation["baseline_revision"] != baseline["revision"]:
+        return None, "ratchet observation baseline revision is stale"
+    if observation["baseline_source_sha256"] != baseline["source_sha256"]:
+        return None, "ratchet observation baseline digest is stale"
+    counts = [
+        observation.get(name) for name in
+        ("baseline_count", "current_count", "new_count", "fixed_count")
+    ]
+    if any(not isinstance(value, int) or value < 0 for value in counts):
+        return None, "ratchet observation counts must be non-negative integers"
+    if observation["baseline_count"] != baseline["violation_count"]:
+        return None, "ratchet observation baseline count does not match the registry"
+    expected_current = (
+        observation["baseline_count"] - observation["fixed_count"]
+        + observation["new_count"]
+    )
+    if expected_current != observation["current_count"]:
+        return None, "ratchet observation count equation is inconsistent"
+    reference, digest, size = persist_evidence_file(
+        root, evidence_dir, path, ".json",
+    )
+    observation["observation_ref"] = reference
+    observation["observation_sha256"] = digest
+    observation["observation_bytes"] = size
+    return observation, None
+
+
 def execute_control(
     root: Path,
     control: dict,
     authorized: set[str],
     capabilities: dict[str, dict],
+    baselines: dict[str, dict],
     evidence_dir: Path,
 ) -> dict:
     control_id = control["id"]
@@ -179,22 +263,36 @@ def execute_control(
     if kind in {"manual", "remote", "privileged"} and not execution.get("command"):
         manual = control.get("manual_evidence")
         current_commit = git_commit(root)
+        evidence_valid = False
+        if isinstance(manual, dict):
+            expires_at = dt.datetime.fromisoformat(
+                manual["expires_at"].replace("Z", "+00:00")
+            )
+            try:
+                evidence_path = project_file(root, manual["evidence_ref"])
+                evidence_digest, _ = digest_file(evidence_path)
+            except (OSError, ValueError):
+                evidence_digest = "missing"
+            evidence_valid = (
+                manual.get("status") == "PASS"
+                and evidence_digest == manual.get("evidence_sha256")
+                and expires_at > dt.datetime.now(dt.timezone.utc)
+            )
         if (
             isinstance(manual, dict)
-            and manual.get("status") == "PASS"
             and manual.get("actor")
-            and manual.get("evidence_ref")
-            and manual.get("reviewed_at")
+            and manual.get("authority_id")
             and manual.get("commit") == current_commit
+            and evidence_valid
         ):
             result.update({"status": "PASS", "manual_evidence": manual})
         else:
             result["status"] = "BLOCKED" if kind in {"remote", "privileged"} else "TODO"
-            result["detail"] = "manual evidence is missing actor, reference, review time, or current commit"
+            result["detail"] = "manual evidence is missing, stale, expired, modified, or bound to another commit"
         return result
 
     if kind in {"file_exists", "file_absent"}:
-        path = root / execution.get("path", "")
+        path = project_file(root, execution.get("path", ""))
         exists = path.exists()
         passed = exists if kind == "file_exists" else not exists
         result.update({
@@ -213,10 +311,15 @@ def execute_control(
         result.update({"status": "FAIL", "detail": "command must be a non-empty argv list"})
         return result
     argv = [part.replace("{commit}", git_commit(root)) for part in argv]
-    cwd = root / execution.get("cwd", ".")
+    cwd = project_file(root, execution.get("cwd", "."))
     timeout = int(execution.get("timeout_seconds", 3600))
     start = time.monotonic()
     try:
+        if control.get("evaluation_mode") == "ratchet_delta":
+            observation_path = project_file(
+                root, control["ratchet_policy"]["observation_path"],
+            )
+            observation_path.unlink(missing_ok=True)
         with tempfile.NamedTemporaryFile(prefix="quality-control-output-") as output:
             process = subprocess.Popen(
                 argv,
@@ -233,12 +336,25 @@ def execute_control(
                 process.kill()
                 exit_code = process.wait()
             output.flush()
-            raw_output = Path(output.name).read_bytes()
+            raw_output_sha256, raw_output_bytes = digest_file(Path(output.name))
+            raw_output, output_truncated = bounded_output(Path(output.name))
         output_ref, output_digest, output_bytes = persist_output(
             root, evidence_dir, redact_output(raw_output),
         )
         artifacts, missing_artifacts = artifact_evidence(root, execution)
         passed = exit_code == 0 and not timed_out and not missing_artifacts
+        debt_observation = None
+        ratchet_error = None
+        if control.get("evaluation_mode") == "ratchet_delta" and not timed_out:
+            debt_observation, ratchet_error = load_debt_observation(
+                root, control, baselines, evidence_dir.parent / "observations",
+            )
+            passed = bool(
+                debt_observation
+                and debt_observation["current_count"] == 0
+                and exit_code == 0
+                and not missing_artifacts
+            )
         result.update({
             "status": "PASS" if passed else "FAIL",
             "command": argv,
@@ -248,10 +364,19 @@ def execute_control(
             "output_sha256": output_digest,
             "output_bytes": output_bytes,
             "output_ref": output_ref,
+            "raw_output_sha256": raw_output_sha256,
+            "raw_output_bytes": raw_output_bytes,
+            "output_truncated": output_truncated,
             "artifacts": artifacts,
         })
+        if debt_observation is not None:
+            result["debt_observation"] = debt_observation
         if timed_out:
             result["detail"] = f"timed out after {timeout}s"
+        elif ratchet_error:
+            result["detail"] = ratchet_error
+        elif debt_observation is not None and debt_observation["current_count"] > 0:
+            result["detail"] = "cleanup debt remains; task/phase ratchet policy may still be evaluated"
         elif missing_artifacts:
             result["detail"] = f"required artifacts missing: {', '.join(missing_artifacts)}"
     except OSError as exc:
@@ -274,10 +399,10 @@ def conclusion(results: list[dict]) -> str:
     return "PASS"
 
 
-def stage_assessment(
+def stage_results(
     runs: list[dict], stage: str, commit: str, target: str,
     registry_sha256: str, workspace_sha256: str, required_control_ids: set[str],
-) -> tuple[list[str], set[str]]:
+) -> tuple[dict[str, tuple[dict, dict]], set[str], set[str]]:
     matching = [
         run for run in runs
         if run.get("commit") == commit
@@ -286,20 +411,193 @@ def stage_assessment(
         and run.get("registry_sha256") == registry_sha256
         and run.get("workspace_sha256") == workspace_sha256
     ]
-    latest: dict[str, tuple[str, str]] = {}
+    latest: dict[str, tuple[dict, dict]] = {}
     for run in matching:
         for result in run.get("results", []):
             control_id = result.get("control_id")
             if control_id in required_control_ids:
-                latest[control_id] = (
-                    result.get("status", "STALE"), run.get("actor", ""),
-                )
-    blockers = sorted(
-        control_id for control_id in required_control_ids
-        if latest.get(control_id, ("STALE", ""))[0] != "PASS"
+                latest[control_id] = (result, run)
+    authorities = {
+        run.get("authority_id", "") for _, run in latest.values()
+        if run.get("authority_id")
+    }
+    contexts = {
+        run.get("execution_context", "") for _, run in latest.values()
+        if run.get("execution_context")
+    }
+    return latest, authorities, contexts
+
+
+def campaign_claim_context(manifest: dict, args: argparse.Namespace) -> tuple[dict, dict | None]:
+    campaign = manifest["development_policy"].get("active_campaign")
+    if not isinstance(campaign, dict):
+        raise ValueError("AI brownfield task/phase outcomes require an active campaign")
+    if args.campaign_id != campaign["id"] or args.campaign_revision != campaign["revision"]:
+        raise ValueError("claim campaign id/revision does not match the active campaign")
+    phase = next((item for item in campaign["phases"] if item["id"] == args.phase_id), None)
+    if phase is None:
+        raise ValueError("claim phase is not registered in the active campaign")
+    if args.claim_scope == "phase":
+        if args.task_id:
+            raise ValueError("phase claims cannot select a task")
+        return phase, None
+    task = next((item for item in phase["tasks"] if item["id"] == args.task_id), None)
+    if task is None:
+        raise ValueError("claim task is not registered in the selected phase")
+    return phase, task
+
+
+def policy_blockers(
+    root: Path, registry: dict, selected_control_ids: set[str], absolute: bool,
+) -> tuple[list[str], list[str]]:
+    framework_errors: list[str] = []
+    blockers: list[str] = []
+    for mapping in registry.get("federated_rule_mappings", []):
+        refs = set(mapping.get("control_refs", []))
+        affected = not refs or bool(refs & selected_control_ids)
+        if not affected:
+            continue
+        if mapping.get("mandatory") and mapping.get("status") == "unmapped":
+            framework_errors.append(f"mandatory project rule is unmapped: {mapping.get('rule_id')}")
+            continue
+        if mapping.get("status") == "disputed":
+            blockers.append(f"policy_conflict:{mapping.get('rule_id')}")
+            continue
+        try:
+            source = project_file(root, mapping["source_ref"])
+            source_digest, _ = digest_file(source)
+        except (OSError, ValueError):
+            source_digest = "missing"
+        if mapping.get("status") == "stale" or source_digest != mapping.get("source_sha256"):
+            blockers.append(f"stale_project_rule:{mapping.get('rule_id')}")
+    now = dt.datetime.now(dt.timezone.utc)
+    for exemption in registry.get("design_scope_exemptions", []):
+        if exemption.get("control_id") not in selected_control_ids:
+            continue
+        review_by = dt.datetime.fromisoformat(exemption["review_by"].replace("Z", "+00:00"))
+        if exemption.get("status") != "active" or review_by <= now:
+            blockers.append(f"expired_design_exemption:{exemption.get('id')}")
+    for baseline in registry.get("baselines", []):
+        if baseline.get("control_id") not in selected_control_ids:
+            continue
+        try:
+            source_digest, _ = digest_file(project_file(root, baseline["source_ref"]))
+        except (OSError, ValueError):
+            source_digest = "missing"
+        if source_digest != baseline.get("source_sha256"):
+            blockers.append(f"stale_baseline:{baseline.get('id')}")
+    if absolute:
+        blockers.extend(
+            f"open_cleanup_debt:{debt['id']}"
+            for debt in registry.get("cleanup_debts", [])
+            if debt.get("status") == "open" and debt.get("control_id") in selected_control_ids
+        )
+    else:
+        for debt in registry.get("cleanup_debts", []):
+            if debt.get("status") != "open" or debt.get("control_id") not in selected_control_ids:
+                continue
+            delete_by = dt.datetime.fromisoformat(debt["delete_by"].replace("Z", "+00:00"))
+            if delete_by <= now:
+                blockers.append(f"overdue_cleanup_debt:{debt['id']}")
+    return framework_errors, sorted(set(blockers))
+
+
+def outcome_blockers(
+    root: Path, latest: dict[str, tuple[dict, dict]], controls: dict[str, dict],
+    required_ids: set[str], exit_policy: dict | None,
+) -> list[str]:
+    blockers: list[str] = []
+    fixed_total = 0
+    policy = exit_policy or {
+        "max_new_violations": 0,
+        "minimum_fixed_violations": 0,
+        "allow_open_cleanup_debt": False,
+    }
+    for control_id in sorted(required_ids):
+        pair = latest.get(control_id)
+        if pair is None:
+            blockers.append(f"{control_id}:STALE")
+            continue
+        result, run = pair
+        if run.get("conclusion") == "DISPUTED":
+            blockers.append(f"{control_id}:DISPUTED")
+            continue
+        artifacts_current = True
+        for artifact in result.get("artifacts", []):
+            try:
+                digest, size = digest_file(project_file(root, artifact["path"]))
+            except (OSError, ValueError):
+                artifacts_current = False
+                break
+            if digest != artifact.get("sha256") or size != artifact.get("bytes"):
+                artifacts_current = False
+                break
+        if not artifacts_current:
+            blockers.append(f"{control_id}:STALE_ARTIFACT")
+            continue
+        if result.get("status") == "PASS":
+            observation = result.get("debt_observation")
+            if isinstance(observation, dict):
+                fixed_total += observation.get("fixed_count", 0)
+            continue
+        control = controls[control_id]
+        observation = result.get("debt_observation")
+        ratchet_allowed = (
+            control.get("evaluation_mode") == "ratchet_delta"
+            and policy.get("allow_open_cleanup_debt") is True
+            and isinstance(observation, dict)
+            and observation.get("new_count", sys.maxsize) <= policy["max_new_violations"]
+        )
+        if ratchet_allowed:
+            fixed_total += observation.get("fixed_count", 0)
+        else:
+            blockers.append(f"{control_id}:{result.get('status', 'STALE')}")
+    if fixed_total < policy["minimum_fixed_violations"]:
+        blockers.append(
+            f"ratchet_reduction:{fixed_total}<{policy['minimum_fixed_violations']}"
+        )
+    return blockers
+
+
+def reviewed_run_error(
+    ledger: dict, args: argparse.Namespace, commit: str, workspace_sha256: str,
+    registry_sha256: str, selected_control_ids: set[str],
+) -> str | None:
+    if args.audit_stage == "self":
+        return "self audit cannot use --review-run" if args.review_run else None
+    expected_stage = {
+        "cross": "self", "release_authority": "cross", "third_party": "release_authority",
+    }[args.audit_stage]
+    if not args.review_run:
+        return f"{args.audit_stage} requires --review-run from {expected_stage}"
+    runs = {run.get("run_id"): run for run in ledger.get("runs", [])}
+    for run_id in args.review_run:
+        source = runs.get(run_id)
+        if source is None:
+            return f"reviewed run does not exist: {run_id}"
+        if source.get("audit_stage") != expected_stage:
+            return f"reviewed run {run_id} is not a {expected_stage} run"
+        if (
+            source.get("commit") != commit
+            or source.get("workspace_sha256") != workspace_sha256
+            or source.get("registry_sha256") != registry_sha256
+        ):
+            return f"reviewed run {run_id} has stale evidence bindings"
+        if not selected_control_ids <= set(source.get("selected_control_ids", [])):
+            return f"reviewed run {run_id} does not cover the selected controls"
+        if source.get("authority_id") == args.authority_id:
+            return f"reviewed run {run_id} has the same authority identity"
+        if source.get("execution_context") == args.execution_context:
+            return f"reviewed run {run_id} has the same execution context"
+    return None
+
+
+def append_chained(collection: list[dict], entry: dict) -> None:
+    entry["previous_entry_sha256"] = (
+        collection[-1].get("entry_sha256", "INVALID") if collection else "GENESIS"
     )
-    actors = {actor for _, actor in latest.values() if actor}
-    return blockers, actors
+    entry["entry_sha256"] = canonical_digest(entry)
+    collection.append(entry)
 
 
 def parse_args() -> argparse.Namespace:
@@ -313,10 +611,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-maturity", choices=MATURITY_LEVELS)
     parser.add_argument("--audit-stage", choices=sorted(AUDIT_STAGES), default="self")
     parser.add_argument("--actor", default="codex")
+    parser.add_argument("--authority-id", help="stable authority identity; display labels are insufficient")
+    parser.add_argument("--execution-context", help="independent session, runner, or organization context")
+    parser.add_argument("--review-run", action="append", default=[],
+                        help="prior run id whose original evidence this audit reviewed")
     parser.add_argument("--authorize", action="append", default=[])
     parser.add_argument("--control", action="append", default=[])
-    parser.add_argument("--claim-scope", choices=("project", "task"), default="project",
-                        help="project requires all controls; task requires explicit --control values")
+    parser.add_argument("--claim-scope", choices=sorted(CLAIM_SCOPES), default="project")
+    parser.add_argument("--campaign-id")
+    parser.add_argument("--campaign-revision", type=int)
+    parser.add_argument("--phase-id")
+    parser.add_argument("--task-id")
     return parser.parse_args()
 
 
@@ -326,7 +631,11 @@ def main() -> int:
         print("FAIL [QF-FRAMEWORK]: actor must be non-empty", file=sys.stderr)
         return 2
     root = Path(args.root).resolve()
-    guardrails = root / args.guardrails_dir
+    try:
+        guardrails = project_file(root, args.guardrails_dir)
+    except ValueError as exc:
+        print(f"FAIL [QF-FRAMEWORK]: {exc}", file=sys.stderr)
+        return 2
     try:
         manifest = load_json_yaml(guardrails / "quality-manifest.yaml")
         registry = load_json_yaml(guardrails / "control-registry.yaml")
@@ -335,11 +644,16 @@ def main() -> int:
     except ValueError as exc:
         print(f"FAIL [QF-FRAMEWORK]: {exc}", file=sys.stderr)
         return 2
+    registry_errors = validate_registry(registry)
+    registry_control_ids = {
+        control.get("id") for control in registry.get("controls", [])
+        if isinstance(control, dict) and isinstance(control.get("id"), str)
+    }
     errors = (
-        validate_manifest(manifest)
-        + validate_registry(registry)
+        registry_errors
+        + validate_manifest(manifest, registry_control_ids)
         + validate_traceability(traceability, registry)
-        + validate_ledger(ledger)
+        + validate_ledger(ledger, root)
     )
     if errors:
         for error in errors:
@@ -379,80 +693,208 @@ def main() -> int:
         if commit == "unavailable" or workspace_sha256 == "unavailable":
             print("BLOCKED [QF-CLAIM]: Git commit and workspace evidence are required", file=sys.stderr)
             return 1
-        if args.claim_scope == "project" and args.control:
-            print("FAIL [QF-CLAIM]: project claims cannot select a control subset", file=sys.stderr)
+        if args.claim_scope in {"project", "release", "phase"} and args.control:
+            print(f"FAIL [QF-CLAIM]: {args.claim_scope} claims cannot select a control subset", file=sys.stderr)
             return 2
-        if args.claim_scope == "task" and not args.control:
-            print("FAIL [QF-CLAIM]: task claims require explicit --control values", file=sys.stderr)
-            return 2
-        if (
-            args.claim_scope == "task"
-            and manifest["project"]["development_mode"] == "ai_brownfield"
+        development_mode = manifest["project"]["development_mode"]
+        campaign_binding = None
+        exit_policy = None
+        if args.claim_scope in {"task", "phase"} and (
+            development_mode == "ai_brownfield" or args.claim_scope == "phase"
         ):
-            print(
-                "BLOCKED [QF-TASK]: AI brownfield task outcomes require "
-                "registered campaign revision and phase context",
-                file=sys.stderr,
-            )
-            return 1
-        if args.claim_scope == "project":
+            try:
+                phase, task = campaign_claim_context(manifest, args)
+            except ValueError as exc:
+                print(f"BLOCKED [QF-{args.claim_scope.upper()}]: {exc}", file=sys.stderr)
+                return 1
+            campaign = manifest["development_policy"]["active_campaign"]
+            if campaign["baseline_registry_sha256"] != registry_sha256:
+                print("BLOCKED [QF-CAMPAIGN]: registry drift requires a campaign revision", file=sys.stderr)
+                return 1
+            if campaign["target_maturity"] != target:
+                print("BLOCKED [QF-CAMPAIGN]: campaign target maturity does not match the claim", file=sys.stderr)
+                return 1
+            registration = task if args.claim_scope == "task" else phase
+            requested = set(args.control)
+            registered = set(registration["affected_control_ids"])
+            if requested and requested != registered:
+                print("FAIL [QF-CLAIM]: selected controls do not match the campaign registration", file=sys.stderr)
+                return 2
+            controls = [control for control in all_controls if control["id"] in registered]
+            if len(controls) != len(registered):
+                print("FAIL [QF-CLAIM]: campaign references controls outside target maturity", file=sys.stderr)
+                return 2
+            exit_policy = registration["exit_policy"]
+            campaign_binding = {
+                "campaign_id": campaign["id"],
+                "campaign_revision": campaign["revision"],
+                "phase_id": phase["id"],
+                "task_id": task["id"] if task else None,
+            }
+        elif args.claim_scope == "task":
+            if not args.control:
+                print("FAIL [QF-CLAIM]: human task claims require explicit --control values", file=sys.stderr)
+                return 2
+        elif any((args.campaign_id, args.campaign_revision, args.phase_id, args.task_id)):
+            print("FAIL [QF-CLAIM]: campaign context is only valid for task/phase claims", file=sys.stderr)
+            return 2
+        if args.claim_scope in {"project", "release"}:
             controls = all_controls
-        required = set(manifest["audit_policy"]["required_stages"])
+        required = set(manifest["claim_policies"][args.claim_scope]["required_stages"])
         applicable_ids = {
             control["id"] for control in controls if control.get("applies", False)
         }
+        controls_by_id = {control["id"]: control for control in controls}
+        framework_errors, policy_failures = policy_blockers(
+            root, registry, set(controls_by_id), args.claim_scope in {"project", "release"},
+        )
+        if framework_errors:
+            for error in framework_errors:
+                print(f"FAIL [QF-FRAMEWORK]: {error}", file=sys.stderr)
+            return 2
+        if policy_failures:
+            print(
+                f"BLOCKED [QF-CLAIM]: policy/debt blockers: {', '.join(policy_failures)}",
+                file=sys.stderr,
+            )
+            return 1
         scope = manifest["scope"]
         if scope["mode"] == "subproject" and scope.get("overall_project_claim_allowed") is not False:
             print("FAIL [QF-CLAIM]: invalid subproject claim policy", file=sys.stderr)
             return 1
+        if scope["mode"] == "subproject" and args.claim_scope in {"project", "release"}:
+            print(
+                "BLOCKED [QF-SCOPE]: subproject evidence cannot support a project or release claim",
+                file=sys.stderr,
+            )
+            return 1
         assessments = {
-            stage: stage_assessment(
+            stage: stage_results(
                 ledger.get("runs", []), stage, commit, target,
                 registry_sha256, workspace_sha256, applicable_ids,
             )
             for stage in sorted(required)
         }
-        blocked_stages = {stage: value[0] for stage, value in assessments.items() if value[0]}
+        blocked_stages = {
+            stage: outcome_blockers(root, value[0], controls_by_id, applicable_ids, exit_policy)
+            for stage, value in assessments.items()
+        }
+        blocked_stages = {stage: value for stage, value in blocked_stages.items() if value}
         if blocked_stages:
             details = "; ".join(
                 f"{stage}: {', '.join(ids)}" for stage, ids in blocked_stages.items()
             )
             print(f"BLOCKED [QF-CLAIM]: controls without current PASS for {commit}: {details}", file=sys.stderr)
             return 1
-        actor_sets = {stage: value[1] for stage, value in assessments.items()}
-        inconsistent = {stage: actors for stage, actors in actor_sets.items() if len(actors) != 1}
+        authority_sets = {stage: value[1] for stage, value in assessments.items()}
+        context_sets = {stage: value[2] for stage, value in assessments.items()}
+        inconsistent = {
+            stage: authorities for stage, authorities in authority_sets.items()
+            if len(authorities) != 1 or len(context_sets[stage]) != 1
+        }
         if inconsistent:
             details = "; ".join(
-                f"{stage}: {', '.join(sorted(actors)) or 'missing'}"
-                for stage, actors in inconsistent.items()
+                f"{stage}: {', '.join(sorted(authorities)) or 'missing'}"
+                for stage, authorities in inconsistent.items()
             )
-            print(f"BLOCKED [QF-CLAIM]: each audit stage needs one identified actor: {details}", file=sys.stderr)
+            print(f"BLOCKED [QF-CLAIM]: each stage needs one authority and execution context: {details}", file=sys.stderr)
             return 1
-        stage_actors = {stage: next(iter(actors)) for stage, actors in actor_sets.items()}
-        if len(set(stage_actors.values())) != len(stage_actors):
-            print("BLOCKED [QF-CLAIM]: audit stages must use independent actors", file=sys.stderr)
+        stage_authorities = {
+            stage: next(iter(authorities)) for stage, authorities in authority_sets.items()
+        }
+        stage_contexts = {
+            stage: next(iter(contexts)) for stage, contexts in context_sets.items()
+        }
+        if (
+            len(set(stage_authorities.values())) != len(stage_authorities)
+            or len(set(stage_contexts.values())) != len(stage_contexts)
+        ):
+            print("BLOCKED [QF-CLAIM]: audit stages must use independent authorities and contexts", file=sys.stderr)
             return 1
-        if args.claim_scope == "task":
-            scope_label = f"task controls {', '.join(sorted(applicable_ids))}"
+        supporting_run_ids = sorted({
+            run["run_id"]
+            for latest, _, _ in assessments.values()
+            for _, run in latest.values()
+        })
+        claim = {
+            "claim_id": str(uuid.uuid4()),
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "claim_scope": args.claim_scope,
+            "outcome": "COMPLETED" if args.claim_scope in {"task", "phase"} else "PASS",
+            "commit": commit,
+            "workspace_sha256": workspace_sha256,
+            "registry_sha256": registry_sha256,
+            "target_maturity": target,
+            "control_ids": sorted(applicable_ids),
+            "audit_stages": sorted(required),
+            "stage_authorities": stage_authorities,
+            "stage_contexts": stage_contexts,
+            "supporting_run_ids": supporting_run_ids,
+            "campaign": campaign_binding,
+        }
+        append_chained(ledger.setdefault("claims", []), claim)
+        write_json_yaml(guardrails / "evidence-ledger.json", ledger)
+        if args.claim_scope in {"task", "phase"}:
+            scope_label = f"{args.claim_scope} controls {', '.join(sorted(applicable_ids))}"
             print(
-                f"COMPLETED [QF-TASK]: controls support {scope_label} at commit "
+                f"COMPLETED [QF-{args.claim_scope.upper()}]: controls support {scope_label} at commit "
                 f"{commit} by {', '.join(sorted(required))}; project maturity is unchanged"
             )
             return 0
         else:
             scope_label = "whole project" if scope["mode"] == "full_repo" else "assessed subproject only"
-        print(f"PASS [QF-CLAIM]: {target} is supported for {scope_label} at commit {commit} by {', '.join(sorted(required))}")
+        print(f"PASS [QF-{args.claim_scope.upper()}]: {target} is supported for {scope_label} at commit {commit} by {', '.join(sorted(required))}")
         return 0
 
+    if not args.authority_id or not args.execution_context:
+        print("FAIL [QF-FRAMEWORK]: --authority-id and --execution-context are required for runs", file=sys.stderr)
+        return 2
+    authority = next(
+        (
+            item for item in manifest["audit_policy"]["authorities"]
+            if item["id"] == args.authority_id
+        ),
+        None,
+    )
+    if authority is None or args.audit_stage not in authority["allowed_stages"]:
+        print(
+            f"FAIL [QF-AUDIT]: authority {args.authority_id} is not registered for {args.audit_stage}",
+            file=sys.stderr,
+        )
+        return 2
+    selected_control_ids = {control["id"] for control in controls}
+    review_error = reviewed_run_error(
+        ledger, args, commit, workspace_sha256, registry_sha256, selected_control_ids,
+    )
+    if review_error:
+        print(f"BLOCKED [QF-AUDIT]: {review_error}", file=sys.stderr)
+        return 1
     authorized = set(args.authorize)
     capabilities = {
         capability["id"]: capability for capability in registry.get("capabilities", [])
     }
+    baselines = {baseline["id"]: baseline for baseline in registry.get("baselines", [])}
     results = [
-        execute_control(root, control, authorized, capabilities, guardrails / "evidence" / "outputs")
+        execute_control(
+            root, control, authorized, capabilities, baselines,
+            guardrails / "evidence" / "outputs",
+        )
         for control in controls
     ]
     final = conclusion(results)
+    reviewed_runs = {
+        run["run_id"]: run for run in ledger.get("runs", [])
+        if run.get("run_id") in set(args.review_run)
+    }
+    if reviewed_runs:
+        prior_status = {
+            result["control_id"]: result.get("status")
+            for run in reviewed_runs.values() for result in run.get("results", [])
+            if result.get("control_id") in selected_control_ids
+        }
+        current_status = {result["control_id"]: result.get("status") for result in results}
+        if prior_status != current_status:
+            final = "DISPUTED"
     run = {
         "run_id": str(uuid.uuid4()),
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -463,6 +905,10 @@ def main() -> int:
         "selected_control_ids": [control["id"] for control in controls],
         "audit_stage": args.audit_stage,
         "actor": args.actor,
+        "authority_id": args.authority_id,
+        "execution_context": args.execution_context,
+        "reviewed_run_ids": sorted(args.review_run),
+        "reviewed_evidence_sha256": canonical_digest({"runs": list(reviewed_runs.values())}),
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -470,13 +916,20 @@ def main() -> int:
         "results": results,
         "conclusion": final,
     }
-    run["previous_entry_sha256"] = (
-        ledger.get("runs", [])[-1].get("entry_sha256", "INVALID")
-        if ledger.get("runs") else "GENESIS"
-    )
-    run["entry_sha256"] = canonical_digest(run)
-    ledger.setdefault("runs", []).append(run)
-    ledger.setdefault("audits", [])
+    append_chained(ledger.setdefault("runs", []), run)
+    if args.audit_stage != "self":
+        audit = {
+            "audit_id": str(uuid.uuid4()),
+            "timestamp": run["timestamp"],
+            "audit_stage": args.audit_stage,
+            "run_id": run["run_id"],
+            "reviewed_run_ids": sorted(args.review_run),
+            "authority_id": args.authority_id,
+            "execution_context": args.execution_context,
+            "reviewed_evidence_sha256": run["reviewed_evidence_sha256"],
+            "conclusion": final,
+        }
+        append_chained(ledger.setdefault("audits", []), audit)
     write_json_yaml(guardrails / "evidence-ledger.json", ledger)
     for result in results:
         print(f"{result['status']:>14}  {result['control_id']}")

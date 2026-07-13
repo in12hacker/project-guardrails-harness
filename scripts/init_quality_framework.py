@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import hashlib
 import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from quality_common import MATURITY_LEVELS, build_traceability_graph, write_json_yaml
+from quality_common import MATURITY_LEVELS, build_traceability_graph, file_sha256, write_json_yaml
 
 
 QUALITY_DIMENSIONS = [
@@ -20,6 +22,32 @@ QUALITY_DIMENSIONS = [
 ]
 
 CHECKOUT_V7_SHA = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
+
+
+def federated_rule_inventory(root: Path, scan: dict) -> list[dict]:
+    observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    mappings: list[dict] = []
+    for item in scan.get("instruction_files", []):
+        relative = item.get("path")
+        if not isinstance(relative, str):
+            continue
+        path = root / relative
+        if not path.is_file():
+            continue
+        source_digest = file_sha256(path)
+        stable_id = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16].upper()
+        mappings.append({
+            "rule_id": f"PROJECT.RULE_SOURCE.{stable_id}",
+            "source_ref": relative,
+            "source_sha256": source_digest,
+            "semantic_owner": "unassigned",
+            "control_refs": [],
+            "mandatory": True,
+            "status": "unmapped",
+            "observed_at": observed_at,
+            "reviewed_at": None,
+        })
+    return mappings
 
 
 def recommended_gate_commands(scan: dict) -> list[list[str]]:
@@ -120,6 +148,8 @@ def control(
 ) -> dict:
     return {
         "id": control_id,
+        "control_revision": "1",
+        "rule_refs": [],
         "title": title,
         "dimension": dimension,
         "source_standard": standard,
@@ -133,6 +163,8 @@ def control(
         "applicability_rationale": "Selected by explicit project profile or repository evidence.",
         "required_from_maturity": maturity,
         "scope": scope or ["."],
+        "evaluation_mode": "absolute",
+        "required_capability_refs": [],
         "execution": execution,
         "evidence_required": evidence,
         "verification_ids": [f"VERIFY.{control_id}"],
@@ -396,7 +428,7 @@ def starter_controls(scan: dict, args: argparse.Namespace) -> list[dict]:
         ):
             controls.append(control(
                 control_id, title, "open_source_governance", f"{path} exists in the repository.",
-                f"Open-source users or contributors lack required project governance information.", maturity,
+                "Open-source users or contributors lack required project governance information.", maturity,
                 {"type": "file_exists", "path": path, "authorization_required": False},
                 [f"repository file {path}"], standard="OSPS Baseline", version="2026.02.19", scope=[path],
             ))
@@ -518,7 +550,7 @@ def main() -> int:
         required_audits.append("third_party")
     scope_mode = args.scope_mode
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "project": {
             "name": args.project_name or root.name,
             "root": str(root),
@@ -554,16 +586,63 @@ def main() -> int:
         },
         "audit_policy": {
             "required_stages": required_audits,
-            "independent_actors": True,
+            "independent_authorities": True,
+            "authorities": [
+                {
+                    "id": "virtual:developer",
+                    "kind": "virtual_role",
+                    "identity_ref": "virtual-team/developer",
+                    "owner": "project-owner",
+                    "allowed_stages": ["self"],
+                },
+                {
+                    "id": "virtual:quality",
+                    "kind": "virtual_role",
+                    "identity_ref": "virtual-team/quality",
+                    "owner": "project-owner",
+                    "allowed_stages": ["cross"],
+                },
+                {
+                    "id": "virtual:release-owner",
+                    "kind": "virtual_role",
+                    "identity_ref": "virtual-team/release-owner",
+                    "owner": "project-owner",
+                    "allowed_stages": ["release_authority"],
+                },
+                *([{
+                    "id": "external:third-party",
+                    "kind": "external",
+                    "identity_ref": "REQUIRED_EXTERNAL_AUTHORITY",
+                    "owner": "project-owner",
+                    "allowed_stages": ["third_party"],
+                }] if "third_party" in required_audits else []),
+            ],
+        },
+        "development_policy": {
+            "active_campaign": None,
+        },
+        "claim_policies": {
+            "task": {"required_stages": ["self", "cross"]},
+            "phase": {"required_stages": ["self", "cross"]},
+            "project": {"required_stages": required_audits},
+            "release": {"required_stages": required_audits},
         },
     }
     write_json_yaml(out_dir / "quality-manifest.yaml", manifest)
     registry = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "controls": starter_controls(scan, args),
+        "capabilities": [],
+        "baselines": [],
+        "cleanup_debts": [],
+        "design_scope_exemptions": [],
+        "federated_rule_mappings": federated_rule_inventory(root, scan),
     }
     write_json_yaml(out_dir / "control-registry.yaml", registry)
-    write_json_yaml(out_dir / "evidence-ledger.json", {"schema_version": "1.0", "runs": [], "audits": []})
+    write_json_yaml(
+        out_dir / "evidence-ledger.json",
+        {"schema_version": "2.0", "runs": [], "audits": [], "claims": []},
+    )
     write_json_yaml(out_dir / "traceability-graph.json", build_traceability_graph(registry))
     print(f"initialized executable quality framework in {out_dir}")
     print("next: review applicability/owners, then run evaluate_quality.py --run")

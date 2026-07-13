@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "project": {
     "name": "REQUIRED",
     "root": ".",
@@ -49,6 +49,20 @@
   },
   "audit_policy": {
     "required_stages": ["self", "cross", "release_authority"],
-    "independent_actors": true
+    "independent_authorities": true,
+    "authorities": [
+      {"id": "virtual:developer", "kind": "virtual_role", "identity_ref": "virtual-team/developer", "owner": "project-owner", "allowed_stages": ["self"]},
+      {"id": "virtual:quality", "kind": "virtual_role", "identity_ref": "virtual-team/quality", "owner": "project-owner", "allowed_stages": ["cross"]},
+      {"id": "virtual:release-owner", "kind": "virtual_role", "identity_ref": "virtual-team/release-owner", "owner": "project-owner", "allowed_stages": ["release_authority"]}
+    ]
+  },
+  "development_policy": {
+    "active_campaign": null
+  },
+  "claim_policies": {
+    "task": {"required_stages": ["self", "cross"]},
+    "phase": {"required_stages": ["self", "cross"]},
+    "project": {"required_stages": ["self", "cross", "release_authority"]},
+    "release": {"required_stages": ["self", "cross", "release_authority"]}
   }
 }

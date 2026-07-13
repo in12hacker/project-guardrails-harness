@@ -379,9 +379,9 @@ def sec_profile(scan: dict) -> str:
     if instr:
         lines += [
             "",
-            "## Existing project rules — AUTHORITATIVE (ingest, do not overwrite)",
+            "## Existing project rules — DOMAIN AUTHORITY (federate, do not overwrite)",
             "",
-            "The project already keeps rule/instruction files. Treat them as the **single source of truth**: read them first, and let this guardrails set only **fill gaps and link to them — never duplicate** a fact that already lives there.",
+            "The project already keeps rule/instruction files. Treat them as the authority for project-specific domain semantics, owners, thresholds, and gates. The portable Skill owns claim, status, evidence, audit, authorization, and campaign meta-semantics. Link and gap-fill instead of copying rules; a conflict blocks the affected claim until it is reviewed.",
             "",
             "| File | Lines |",
             "|---|---|",
@@ -859,7 +859,7 @@ def build_index(scan: dict) -> str:
     if instr:
         lines += [
             f"> ⚠ **{len(instr)} existing rule/instruction files detected** (AGENTS.md / `.claude`|`cursor`|`codex` rules / CONTRIBUTING …).",
-            "> They are the **authoritative source of truth**. This `.guardrails/` set exists to **link to them and fill gaps — not to replace or duplicate**. See *Existing project rules* in [profile.md](profile.md).",
+            "> They own **project domain semantics**; the portable Skill owns claim/evidence meta-semantics. This `.guardrails/` set links and fills gaps instead of duplicating either owner. Conflicts block the affected claim. See *Existing project rules* in [profile.md](profile.md).",
             "",
         ]
     lines += [
@@ -874,7 +874,7 @@ def build_index(scan: dict) -> str:
         "",
         "## At a glance",
         f"- Languages: {', '.join(languages) or 'unknown'} · CI: {yes(ci)} · Tests sampled: {len(scan.get('test_files_sample', []))} · Release artifacts: {yes(evidence.get('release'))}",
-        f"- **Profile: classify yourself** from [profile.md](profile.md) (README excerpt + dependencies) — the scanner does not guess.",
+        "- **Profile: classify yourself** from [profile.md](profile.md) (README excerpt + dependencies) — the scanner does not guess.",
         "",
         "## Non-negotiables (always hold)",
         "- **Evidence over claims** — no completion / mergeable / release-ready claim without code path + commit + CI/manual evidence.",

@@ -36,6 +36,40 @@ Project memory is not a place for guesses. Record a fact only with evidence, and
 
 Use `decisions.md` for unresolved hypotheses. Use `memory.md` only for durable facts with code paths, evidence, and a status.
 
+## Cross-Project Reference Learning
+
+Reference repositories are comparative evidence, not authority over the target
+project. Record each observation against an immutable revision before deriving a
+portable candidate:
+
+```text
+ReferenceObservation:
+  source_url:
+  source_revision:
+  source_profile:
+  checkout_scope:                  # full or exact sparse paths
+  evidence_paths:
+  observed_practice:
+  risk_addressed:
+  applicability_boundary:
+  counterexample_or_limitation:
+  corroborating_sources_or_standard:
+  status: observed_once|repeated|verified_by_tests|rejected
+```
+
+Rules:
+
+- one repository can produce only `observed_once`, never an applicable target
+  control by itself;
+- language, filename, directory layout, popularity, or foundation membership is
+  not an applicability decision;
+- sparse checkouts cannot provide negative evidence about omitted paths;
+- promotion requires either independent corroboration or a stable formal
+  standard, an explicit target-project profile decision, owner review, a
+  runnable verification path, and positive/negative fixtures;
+- preserve counterexamples and rejected derivations so later scans do not
+  recreate the same false rule.
+
 ## Candidate Project Rules
 
 `rules/candidates.md` is the bridge between generic guardrail families and a project's eventual local rules. It is not an authority file. It is a queue of evidence-backed drafts that a maintainer can accept, rewrite, split, or reject.

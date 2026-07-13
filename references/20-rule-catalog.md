@@ -106,6 +106,33 @@ ArchitectureDecision:
   rollback:
 ```
 
+```text
+WorkspaceBoundaryGate:
+  selected_build_topology:          # explicit profile decision
+  build_boundary:                   # default-members / exclude / per-target build matrix
+  mixed_form_crates:                # no_std/kernel/firmware vs userspace/std physical isolation
+  shared_abi_owner:                 # single crate owning the cross-form ABI / repr(C) types
+  forbidden_cross_form_dependency:  # e.g. userspace reverse-depending on a kernel/no_std crate
+  verification:
+```
+
+Use this rule when the profile explicitly selects `multi_form` or `cross_target`;
+repository paths may support the decision but cannot make it. Examples include
+userspace + `#![no_std]`/kernel, host + cross-compiled target, and std +
+`alloc`-only. Reject patterns:
+
+- a build form that silently fails the default `cargo build` because it needs a
+  non-default target or linker, with no `default-members` or documented matrix;
+- shared wire/ABI types duplicated on both sides of a form boundary instead of
+  owned by one `-common` crate consumed by both;
+- a userspace/std crate depending on a `#![no_std]`/kernel crate (or vice versa)
+  without an explicit, owned cross-form contract;
+- a per-target build matrix that is folklore, not encoded in CI or a build tool.
+
+The boundary is owned by the workspace, not by individual crates: the single
+source of truth is the `default-members`/exclude declaration plus the shared-ABI
+crate, both enforced by CI.
+
 ## 4. Domain Model and Parameter Flow
 
 Purpose: preserve meaning across layers.
@@ -654,10 +681,25 @@ CommercialDeliveryGate:
   release_authority:
 ```
 
+When `distribution_model` is `open_core`, add:
+
+```text
+OpenCoreLicenseGate:
+  component_inventory:
+  repository_service_and_package_boundary:
+  license_expression_by_component:
+  feature_gating_and_fallback:         # when applicable
+  file_level_license_identifiers:      # when selected by the legal owner
+  license_conversion_terms:            # when the selected license defines them
+  first_and_third_party_notices:
+```
+
 Do not infer laws from repository content. Missing expertise or business
 process remains `TODO` or `BLOCKED`, never implicit `PASS`. Open-source projects
 may map independent cross-audit to a separate quality agent and release
-authority to a project owner.
+authority to a project owner. An open-core boundary inferred from a path,
+filename, feature flag, or one reference repository is a hypothesis, not a
+`PASS`. The owner must confirm which conditional fields apply.
 
 ## 22. AI Assurance Overlay
 
@@ -680,3 +722,37 @@ AIAssuranceGate:
 AI-assisted development of ordinary software does not by itself make the
 product an AI system. When this overlay applies, model-only scores cannot replace
 end-to-end product, tool-boundary, misuse, and human-oversight evidence.
+
+### AI-Assisted Contribution Governance
+
+A separate concern from product AI behavior: how the project governs code and
+content contributed *with the assistance of* AI tools (copilots, agentic PRs,
+generated patches). This applies only when the explicit
+`external_contributions` profile is `accepted` or `restricted`, regardless of
+`ai_system`. It is contribution governance, not product assurance. Foundation
+guidance and individual project policies are useful inputs, but they do not
+establish one mandatory cross-ecosystem position.
+
+```text
+AIContributionGate:
+  selected_policy:                  # allowed | restricted | prohibited
+  ai_disclosure_policy:             # whether agentic/AI-assisted PRs must disclose AI usage
+  contributor_accountability:       # contributor bears same responsibility for AI output as hand-written code
+  review_standard_parity:           # AI-generated PRs meet the same review bar; no rubber-stamp fast lane
+  licensing_rights_verification:    # contributor attests they hold rights to contribute the AI output
+  model_attribution_when_required:  # commit/PR notes the model when policy requires it
+```
+
+Reject patterns:
+
+- agentic PRs are merged under a looser review standard than human PRs for the
+  same risk class;
+- the selected policy contradicts contribution instructions, the DCO/CLA, or
+  actual review automation;
+- the project accepts or restricts external contributions but has no recorded
+  decision for AI-assisted submissions;
+- disclosure policy is undocumented, so "AI-authored" tagging is inconsistent
+  across contributors.
+
+A project may legitimately choose "no special AI policy, all contributions meet
+the same bar" — but that decision must be explicit, not silent.

@@ -13,7 +13,7 @@ Profile Overlays; Product Paradigm Fit; Criticality; Classification Warnings.
 ProjectProfile:
   project_type:
   development_mode:                # ai_greenfield | ai_brownfield | human_greenfield | human_brownfield
-  distribution_model:              # open_source | private_commercial | saas | client_software | embedded
+  distribution_model:              # open_source | open_core | private_commercial | saas | client_software | embedded | mixed
   target_market:                    # explicit; never inferred
   target_maturity:                  # prototype through regulated_ready
   assessed_scope:                   # whole_project or named subproject/path set
@@ -25,6 +25,10 @@ ProjectProfile:
   trust_boundaries:
   release_model:
   deployment_model:
+  public_contracts:                # explicit list; `none` cannot be combined
+  build_topology:                  # single_form | multi_form | cross_target
+  persistent_state:                # none | database | indexed_store | on_disk_format | client_state | mixed
+  external_contributions:          # accepted | restricted | closed
   existing_ci:
   acceptance_surface:
   ownership_model:                 # strong | weak | collective; team/domain-aligned CODEOWNERS (not folder-aligned)
@@ -48,6 +52,43 @@ assessment never claims readiness for the containing product.
 
 Known debt is never converted to `PASS`. Continued feature development in a
 human brownfield project is a scope decision, not a waiver of project quality.
+
+## Open-Core Distribution
+
+`open_core` is a distribution model in which an open-source component and one or
+more commercially controlled components or services form one product offering.
+The boundary may be in one repository, multiple repositories, build-time
+features, packaging, or a hosted service. Do not encode repository topology or a
+specific license family into the profile name.
+
+Open-source governance still applies, plus these mandatory decisions:
+
+```text
+OpenCoreProfile:
+  component_inventory:
+  repository_and_service_topology:
+  license_expression_by_component:
+  distribution_and_packaging_boundary:
+  feature_gate_or_fallback:         # only when the selected design uses one
+  conversion_terms:                 # only when the selected license has them
+  first_and_third_party_notices:
+```
+
+Possible implementations, not universal requirements:
+
+- A same-repository edition split may use a feature gate and a typed
+  "commercial component required" result rather than a silent no-op.
+- A license with conversion terms needs those terms represented in the owned
+  license inventory; licenses without conversion terms do not.
+- File-level SPDX identifiers can make a mixed-license boundary machine-readable
+  when the legal owner selects that convention.
+- Multi-repository or service boundaries need release and deployment evidence;
+  a source-tree scan cannot establish them.
+
+Do not infer the commercial boundary from a feature flag, path, filename, or
+license keyword. Component scope, license posture, conversion terms, and notices
+are explicit owner decisions. MPL-2.0 and other copyleft licenses must not be
+described as permissive.
 
 ## Assurance Responsibility
 

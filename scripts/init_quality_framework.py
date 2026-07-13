@@ -145,6 +145,7 @@ def control(
     scope: list[str] | None = None,
     standard: str = "project-guardrails-harness",
     version: str = "1.0",
+    applicability_rationale: str = "Selected by explicit project profile or repository evidence.",
 ) -> dict:
     return {
         "id": control_id,
@@ -160,7 +161,7 @@ def control(
         "risk_ids": [f"RISK.{control_id}"],
         "owner": owner,
         "applies": True,
-        "applicability_rationale": "Selected by explicit project profile or repository evidence.",
+        "applicability_rationale": applicability_rationale,
         "required_from_maturity": maturity,
         "scope": scope or ["."],
         "evaluation_mode": "absolute",
@@ -182,12 +183,13 @@ def command_control(control_id: str, title: str, dimension: str, requirement: st
 
 
 def manual_control(control_id: str, title: str, dimension: str, requirement: str,
-                   risk: str, maturity: str, *, owner: str = "quality") -> dict:
+                   risk: str, maturity: str, *, owner: str = "quality",
+                   applicability_rationale: str = "Selected by explicit project profile or repository evidence.") -> dict:
     return control(
         control_id, title, dimension, requirement, risk, maturity,
         {"type": "manual", "authorization_required": False},
         ["named owner", "reviewed evidence reference", "review timestamp"],
-        owner=owner,
+        owner=owner, applicability_rationale=applicability_rationale,
     )
 
 
@@ -420,7 +422,7 @@ def starter_controls(scan: dict, args: argparse.Namespace) -> list[dict]:
                 "engineering_ready",
             ))
 
-    if args.distribution_model == "open_source":
+    if args.distribution_model in ("open_source", "open_core"):
         for path, control_id, title, maturity in (
             ("LICENSE", "QF.OSPS.LICENSE", "Source license is published", "engineering_ready"),
             ("SECURITY.md", "QF.OSPS.SECURITY", "Security contact and disclosure policy exist", "commercial_ready"),
@@ -428,10 +430,32 @@ def starter_controls(scan: dict, args: argparse.Namespace) -> list[dict]:
         ):
             controls.append(control(
                 control_id, title, "open_source_governance", f"{path} exists in the repository.",
-                "Open-source users or contributors lack required project governance information.", maturity,
+                "Users or contributors lack required source-distribution governance information.", maturity,
                 {"type": "file_exists", "path": path, "authorization_required": False},
                 [f"repository file {path}"], standard="OSPS Baseline", version="2026.02.19", scope=[path],
             ))
+
+    if args.distribution_model == "open_core":
+        # Open-core inherits source-distribution governance. Its selected
+        # component/license boundary must also be owner-confirmed.
+        controls.extend([
+            manual_control(
+                "QF.OPENCORE.LICENSE_BOUNDARY", "Open-core component and license boundary is codified", "commercial_delivery",
+                "The selected community/commercial component, repository, service, and license boundaries are explicit; "
+                "feature gating, fallback behavior, file-level notices, and license conversion terms are verified when applicable.",
+                "A commercial boundary inferred from paths or feature flags can hide distribution and support obligations.",
+                "commercial_ready", owner="legal",
+                applicability_rationale="The project explicitly selected the open_core distribution model.",
+            ),
+            manual_control(
+                "QF.OPENCORE.COMPONENT_LICENSE_INVENTORY", "Component license inventory exists", "commercial_delivery",
+                "A machine-readable inventory maps distributed first-party and third-party components to their licenses, "
+                "notices, edition boundary, and owner-approved exceptions.",
+                "Multi-license distribution can ship incompatible, unattributed, or misclassified components.",
+                "commercial_ready", owner="legal",
+                applicability_rationale="The project explicitly selected the open_core distribution model.",
+            ),
+        ])
 
     if args.ai_system:
         controls.extend([
@@ -466,6 +490,54 @@ def starter_controls(scan: dict, args: argparse.Namespace) -> list[dict]:
                 "production_ready", owner="operations",
             ),
         ])
+
+    public_contracts = set(args.public_contract)
+    if public_contracts != {"none"}:
+        controls.append(manual_control(
+            "QF.API.STABILITY", "Public API stability is enforced", "compatibility",
+            "Public API or contract changes are detected by an executable check (public-API snapshot diff, "
+            "breaking-change detector on the spec, or semver enforcement) that fails a breaking change without a version bump.",
+            "Semantic versioning asserted without a runnable check relies on reviewer memory and can silently break consumers.",
+            "commercial_ready", owner="architecture",
+            applicability_rationale=(
+                "The project explicitly selected public contracts: "
+                + ", ".join(sorted(public_contracts)) + "."
+            ),
+        ))
+
+    if args.build_topology != "single_form":
+        controls.append(manual_control(
+            "QF.ARCHITECTURE.WORKSPACE_BOUNDARY", "Build topology boundary is enforced", "maintainability",
+            "The selected multi-form or cross-target build graph, default build, target matrix, shared contracts, "
+            "and forbidden dependencies are explicit and CI-enforced.",
+            "A non-default build form can fail silently or drift across target boundaries.",
+            "engineering_ready", owner="architecture",
+            applicability_rationale=f"The project explicitly selected build_topology={args.build_topology}.",
+        ))
+
+    if args.persistent_state != "none":
+        controls.append(manual_control(
+            "QF.OPERATIONS.SCHEMA_EVOLUTION", "Schema and persistence evolution is controlled", "compatibility",
+            "Persistent-state changes have a breaking-change detector, a cross-version upgrade/downgrade test, and "
+            "data-migration safety evidence with content checksums.",
+            "A schema or on-disk format change can strand user data or break rollback without a unit test catching it.",
+            "production_ready", owner="release",
+            applicability_rationale=f"The project explicitly selected persistent_state={args.persistent_state}.",
+        ))
+
+    if args.external_contributions != "closed":
+        controls.append(manual_control(
+            "QF.CONTRIBUTION.AI_POLICY", "AI-assisted contribution governance is explicit", "framework_governance",
+            "The project documents how AI-assisted/agentic contributions are disclosed, reviewed, and licensed; "
+            "AI-generated PRs meet the same review bar; an explicit \"no special policy\" stance is valid, silence is not.",
+            "Reviewers lack a basis to reject low-quality AI volume or verify licensing rights for AI output.",
+            "commercial_ready", owner="quality",
+            applicability_rationale=(
+                "The project explicitly selected external_contributions="
+                f"{args.external_contributions}."
+            ),
+        ))
+
     return controls
 
 
@@ -480,7 +552,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-maturity", required=True, choices=MATURITY_LEVELS)
     parser.add_argument("--product-type", action="append", required=True)
     parser.add_argument("--distribution-model", required=True,
-                        choices=("open_source", "private_commercial", "saas", "client_software", "embedded", "mixed"))
+                        choices=("open_source", "open_core", "private_commercial", "saas", "client_software", "embedded", "mixed"))
     parser.add_argument("--market", action="append", required=True)
     parser.add_argument("--criticality", required=True, choices=("low", "medium", "high", "critical"))
     parser.add_argument("--data-sensitivity", required=True,
@@ -489,6 +561,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--support-model", required=True,
                         choices=("community", "best_effort", "contracted", "managed", "none"))
     parser.add_argument("--primary-user", action="append", required=True)
+    parser.add_argument("--public-contract", action="append", required=True,
+                        choices=("none", "library_api", "service_api", "wire_protocol", "extension_api", "plugin_api", "file_format"))
+    parser.add_argument("--build-topology", required=True,
+                        choices=("single_form", "multi_form", "cross_target"))
+    parser.add_argument("--persistent-state", required=True,
+                        choices=("none", "database", "indexed_store", "on_disk_format", "client_state", "mixed"))
+    parser.add_argument("--external-contributions", required=True,
+                        choices=("accepted", "restricted", "closed"))
     ai_group = parser.add_mutually_exclusive_group(required=True)
     ai_group.add_argument("--ai-system", action="store_true")
     ai_group.add_argument("--no-ai-system", action="store_false", dest="ai_system")
@@ -505,6 +585,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if "none" in args.public_contract and len(args.public_contract) != 1:
+        print("--public-contract none cannot be combined with another contract type", file=sys.stderr)
+        return 2
     root = Path(args.root).resolve()
     out_dir = (root / args.out_dir).resolve() if not Path(args.out_dir).is_absolute() else Path(args.out_dir)
     if out_dir.exists() and any(out_dir.iterdir()) and not args.force:
@@ -566,6 +649,10 @@ def main() -> int:
             "deployment_models": args.deployment_model,
             "support_model": args.support_model,
             "primary_users": args.primary_user,
+            "public_contracts": args.public_contract,
+            "build_topology": args.build_topology,
+            "persistent_state": args.persistent_state,
+            "external_contributions": args.external_contributions,
             "ai_system": args.ai_system,
             "legal_profiles": args.legal_profile,
             "quality_dimensions": QUALITY_DIMENSIONS,

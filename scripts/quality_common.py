@@ -353,7 +353,8 @@ def validate_manifest(
         {
             "product_types", "distribution_model", "target_markets", "criticality",
             "data_sensitivity", "deployment_models", "support_model", "primary_users",
-            "ai_system", "legal_profiles", "quality_dimensions",
+            "public_contracts", "build_topology", "persistent_state",
+            "external_contributions", "ai_system", "legal_profiles", "quality_dimensions",
         },
         "profile",
     ))
@@ -374,6 +375,9 @@ def validate_manifest(
         "profile.criticality": profile.get("criticality"),
         "profile.data_sensitivity": profile.get("data_sensitivity"),
         "profile.support_model": profile.get("support_model"),
+        "profile.build_topology": profile.get("build_topology"),
+        "profile.persistent_state": profile.get("persistent_state"),
+        "profile.external_contributions": profile.get("external_contributions"),
     }
     for name, value in required_strings.items():
         if not isinstance(value, str) or not value or value == "REQUIRED":
@@ -385,21 +389,39 @@ def validate_manifest(
     }:
         errors.append("project.development_mode is invalid")
     enum_fields = {
-        "distribution_model": {"open_source", "private_commercial", "saas", "client_software", "embedded", "mixed"},
+        "distribution_model": {"open_source", "open_core", "private_commercial", "saas", "client_software", "embedded", "mixed"},
         "criticality": {"low", "medium", "high", "critical"},
         "data_sensitivity": {"public", "internal", "confidential", "restricted", "regulated"},
         "support_model": {"community", "best_effort", "contracted", "managed", "none"},
+        "build_topology": {"single_form", "multi_form", "cross_target"},
+        "persistent_state": {"none", "database", "indexed_store", "on_disk_format", "client_state", "mixed"},
+        "external_contributions": {"accepted", "restricted", "closed"},
     }
     for name, allowed in enum_fields.items():
         if profile.get(name) not in allowed:
             errors.append(f"profile.{name} is invalid")
     for name in (
         "product_types", "target_markets", "deployment_models", "primary_users",
-        "legal_profiles", "quality_dimensions",
+        "legal_profiles", "quality_dimensions", "public_contracts",
     ):
         value = profile.get(name)
         if not isinstance(value, list) or not value or "REQUIRED" in value:
             errors.append(f"profile.{name} must be a non-empty explicit list")
+    public_contracts = profile.get("public_contracts")
+    allowed_public_contracts = {
+        "none", "library_api", "service_api", "wire_protocol", "extension_api",
+        "plugin_api", "file_format",
+    }
+    if isinstance(public_contracts, list):
+        if any(not isinstance(item, str) for item in public_contracts):
+            errors.append("profile.public_contracts must contain only strings")
+        else:
+            if len(set(public_contracts)) != len(public_contracts):
+                errors.append("profile.public_contracts must not contain duplicates")
+            if not set(public_contracts) <= allowed_public_contracts:
+                errors.append("profile.public_contracts contains an invalid value")
+            if "none" in public_contracts and len(public_contracts) != 1:
+                errors.append("profile.public_contracts cannot combine none with another contract type")
     if not isinstance(profile.get("ai_system"), bool):
         errors.append("profile.ai_system must be boolean")
     if scope.get("mode") not in {"full_repo", "subproject"}:

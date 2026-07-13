@@ -32,11 +32,11 @@
     },
     "profile": {
       "type": "object",
-      "required": ["product_types", "distribution_model", "target_markets", "criticality", "data_sensitivity", "deployment_models", "support_model", "primary_users", "ai_system", "legal_profiles"],
+      "required": ["product_types", "distribution_model", "target_markets", "criticality", "data_sensitivity", "deployment_models", "support_model", "primary_users", "public_contracts", "build_topology", "persistent_state", "external_contributions", "ai_system", "legal_profiles"],
       "properties": {
         "product_types": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "distribution_model": {
-          "enum": ["open_source", "private_commercial", "saas", "client_software", "embedded", "mixed"]
+          "enum": ["open_source", "open_core", "private_commercial", "saas", "client_software", "embedded", "mixed"]
         },
         "target_markets": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "criticality": {"enum": ["low", "medium", "high", "critical"]},
@@ -44,6 +44,21 @@
         "deployment_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "support_model": {"enum": ["community", "best_effort", "contracted", "managed", "none"]},
         "primary_users": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "public_contracts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["none", "library_api", "service_api", "wire_protocol", "extension_api", "plugin_api", "file_format"]},
+          "not": {
+            "allOf": [
+              {"contains": {"const": "none"}},
+              {"minItems": 2}
+            ]
+          }
+        },
+        "build_topology": {"enum": ["single_form", "multi_form", "cross_target"]},
+        "persistent_state": {"enum": ["none", "database", "indexed_store", "on_disk_format", "client_state", "mixed"]},
+        "external_contributions": {"enum": ["accepted", "restricted", "closed"]},
         "ai_system": {"type": "boolean"},
         "legal_profiles": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "quality_dimensions": {"type": "array", "minItems": 1, "items": {"type": "string"}}

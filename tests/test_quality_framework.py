@@ -22,6 +22,12 @@ class QualityFrameworkTest(unittest.TestCase):
         self, extra_files: dict[str, str] | None = None,
         init_args: tuple[str, ...] = (),
         development_mode: str = "human_brownfield",
+        distribution_model: str = "open_source",
+        public_contracts: tuple[str, ...] = ("none",),
+        build_topology: str = "single_form",
+        persistent_state: str = "none",
+        external_contributions: str = "accepted",
+        ai_system: bool = False,
     ) -> Path:
         temp = Path(tempfile.mkdtemp(prefix="quality-framework-test-"))
         (temp / "README.md").write_text("# Fixture\n", encoding="utf-8")
@@ -40,14 +46,22 @@ class QualityFrameworkTest(unittest.TestCase):
                 "--development-mode", development_mode,
                 "--target-maturity", "prototype",
                 "--product-type", "cli",
-                "--distribution-model", "open_source",
+                "--distribution-model", distribution_model,
                 "--market", "global_unspecified",
                 "--criticality", "low",
                 "--data-sensitivity", "public",
                 "--deployment-model", "local",
                 "--support-model", "community",
                 "--primary-user", "developer",
-                "--no-ai-system",
+                *[
+                    item
+                    for contract in public_contracts
+                    for item in ("--public-contract", contract)
+                ],
+                "--build-topology", build_topology,
+                "--persistent-state", persistent_state,
+                "--external-contributions", external_contributions,
+                "--ai-system" if ai_system else "--no-ai-system",
                 "--scope-mode", "full_repo",
                 "--legal-profile", "none_identified",
                 *init_args,
@@ -118,6 +132,80 @@ class QualityFrameworkTest(unittest.TestCase):
         manifest = json.loads((guardrails / "quality-manifest.yaml").read_text())
         self.assertIn("claim_policies", manifest)
         self.assertIn("development_policy", manifest)
+        self.assertEqual(["none"], manifest["profile"]["public_contracts"])
+        self.assertEqual("single_form", manifest["profile"]["build_topology"])
+        self.assertEqual("none", manifest["profile"]["persistent_state"])
+        self.assertEqual("accepted", manifest["profile"]["external_contributions"])
+
+    def test_open_core_round_trips_through_v2_contract(self) -> None:
+        project = self.make_project(distribution_model="open_core")
+        result = self.run_evaluator(project, "--claim")
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertNotIn("profile.distribution_model is invalid", result.stderr)
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_ids = {item["id"] for item in registry["controls"]}
+        self.assertIn("QF.OSPS.CONTRIBUTING", control_ids)
+        self.assertIn("QF.OPENCORE.LICENSE_BOUNDARY", control_ids)
+        self.assertIn("QF.OPENCORE.COMPONENT_LICENSE_INVENTORY", control_ids)
+
+    def test_path_keywords_do_not_select_applicable_controls(self) -> None:
+        project = self.make_project({
+            "src/kernel_cache.rs": "pub fn cache() {}\n",
+            "docs/migration-guide.md": "# Rename a CLI flag\n",
+            "crates/app/src/lib.rs": "pub fn app() {}\n",
+            "crates/internal/src/lib.rs": "pub(crate) fn helper() {}\n",
+        })
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_ids = {item["id"] for item in registry["controls"]}
+        self.assertNotIn("QF.API.STABILITY", control_ids)
+        self.assertNotIn("QF.ARCHITECTURE.WORKSPACE_BOUNDARY", control_ids)
+        self.assertNotIn("QF.OPERATIONS.SCHEMA_EVOLUTION", control_ids)
+
+    def test_explicit_profile_selects_controls_without_path_markers(self) -> None:
+        project = self.make_project(
+            distribution_model="private_commercial",
+            public_contracts=("extension_api",),
+            build_topology="cross_target",
+            persistent_state="client_state",
+            external_contributions="closed",
+        )
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        controls = {item["id"]: item for item in registry["controls"]}
+        self.assertIn("QF.API.STABILITY", controls)
+        self.assertIn("QF.ARCHITECTURE.WORKSPACE_BOUNDARY", controls)
+        self.assertIn("QF.OPERATIONS.SCHEMA_EVOLUTION", controls)
+        self.assertNotIn("QF.CONTRIBUTION.AI_POLICY", controls)
+        self.assertIn("extension_api", controls["QF.API.STABILITY"]["applicability_rationale"])
+
+    def test_external_contribution_decision_is_independent_of_product_ai(self) -> None:
+        closed_ai = self.make_project(
+            distribution_model="private_commercial",
+            external_contributions="closed",
+            ai_system=True,
+        )
+        closed_registry = json.loads(
+            (closed_ai / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        closed_ids = {item["id"] for item in closed_registry["controls"]}
+        self.assertIn("QF.AI.INTENDED_USE", closed_ids)
+        self.assertNotIn("QF.CONTRIBUTION.AI_POLICY", closed_ids)
+
+        restricted_non_ai = self.make_project(
+            distribution_model="private_commercial",
+            external_contributions="restricted",
+        )
+        restricted_registry = json.loads(
+            (restricted_non_ai / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        restricted_ids = {item["id"] for item in restricted_registry["controls"]}
+        self.assertIn("QF.CONTRIBUTION.AI_POLICY", restricted_ids)
+        self.assertNotIn("QF.AI.INTENDED_USE", restricted_ids)
 
     def test_unknown_claim_critical_manifest_field_is_rejected(self) -> None:
         project = self.make_project()
@@ -128,6 +216,32 @@ class QualityFrameworkTest(unittest.TestCase):
         result = self.run_evaluator(project, "--claim")
         self.assertEqual(result.returncode, 2)
         self.assertIn("manifest.silent_claim_override is not allowed", result.stderr)
+
+    def test_ambiguous_public_contract_profile_is_rejected(self) -> None:
+        project = self.make_project()
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["profile"]["public_contracts"] = ["none", "service_api"]
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        result = self.run_evaluator(project, "--claim")
+        self.assertEqual(2, result.returncode)
+        self.assertIn(
+            "profile.public_contracts cannot combine none",
+            result.stderr,
+        )
+
+    def test_non_string_public_contract_profile_is_rejected_without_crashing(self) -> None:
+        project = self.make_project()
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["profile"]["public_contracts"] = [{"type": "service_api"}]
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        result = self.run_evaluator(project, "--claim")
+        self.assertEqual(2, result.returncode)
+        self.assertIn(
+            "profile.public_contracts must contain only strings",
+            result.stderr,
+        )
 
     def test_missing_declared_capability_blocks_before_product_command(self) -> None:
         project = self.make_project()
@@ -325,6 +439,15 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertIn("Do not introduce `RATCHET_PASS` or `INHERITED_PASS`", lifecycle)
         self.assertIn("actor display label does not prove independence", audit)
         self.assertIn("Environment Capability Gate", audit)
+
+    def test_reference_learning_cannot_promote_one_repository_to_a_control(self) -> None:
+        lifecycle = (ROOT / "references" / "40-rule-lifecycle.md").read_text()
+        self.assertIn("source_revision:", lifecycle)
+        self.assertIn("counterexample_or_limitation:", lifecycle)
+        self.assertIn(
+            "one repository can produce only `observed_once`",
+            lifecycle,
+        )
 
     def test_registry_change_invalidates_graph_and_prior_evidence(self) -> None:
         project = self.make_project()
@@ -691,6 +814,26 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual("FF-01", scan["fitness_registry"][0]["id"])
         self.assertEqual(2, len(scan["package_scripts"]))
         self.assertEqual("make gate", scan["ci_commands"][0]["value"])
+
+    def test_scanner_keeps_release_and_hygiene_evidence_out_of_security(self) -> None:
+        project = self.make_project({
+            "PGP-KEY.asc": "fixture release key\n",
+            "cosign.pub": "fixture verification key\n",
+            "rust-toolchain.toml": "[toolchain]\nchannel = 'stable'\n",
+        })
+        output = project / "scan-taxonomy.json"
+        result = subprocess.run(
+            [sys.executable, str(SCAN), "--root", str(project), "--out", str(output)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = json.loads(output.read_text())["evidence"]
+        self.assertIn("PGP-KEY.asc", evidence["release"])
+        self.assertIn("cosign.pub", evidence["release"])
+        self.assertNotIn("PGP-KEY.asc", evidence["security"])
+        self.assertNotIn("cosign.pub", evidence["security"])
+        self.assertIn("rust-toolchain.toml", evidence["engineering_hygiene"])
+        self.assertNotIn("rust-toolchain.toml", evidence["governance"])
 
     def test_explicit_scaffold_creates_non_installing_gate_and_pinned_ci(self) -> None:
         project = self.make_project(

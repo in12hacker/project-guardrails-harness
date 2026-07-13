@@ -58,7 +58,7 @@ a project-specific requirement, measure, threshold, control, and evidence path.
 QualityProfile:
   product_type:
   development_mode:
-  distribution_model: open_source|private_commercial|saas|client_software|embedded
+  distribution_model: open_source|open_core|private_commercial|saas|client_software|embedded|mixed
   target_markets:
   target_maturity:
   criticality:
@@ -67,6 +67,10 @@ QualityProfile:
   runtime_and_deployment:
   release_artifacts:
   support_model:
+  public_contracts: none|library_api|service_api|wire_protocol|extension_api|plugin_api|file_format
+  build_topology: single_form|multi_form|cross_target
+  persistent_state: none|database|indexed_store|on_disk_format|client_state|mixed
+  external_contributions: accepted|restricted|closed
   assessed_scope:
   excluded_scope:
   regulatory_overlays:

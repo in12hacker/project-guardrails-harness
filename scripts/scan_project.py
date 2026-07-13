@@ -73,12 +73,31 @@ MARKERS = {
     "docker": ["Dockerfile", "docker-compose.yml", "compose.yml"],
     "kubernetes": ["Chart.yaml", "kustomization.yaml"],
     "openapi": ["openapi.yaml", "openapi.yml", "swagger.yaml"],
-    "security": ["SECURITY.md", "deny.toml", ".github/dependabot.yml", "CODEOWNERS"],
-    "release": ["Makefile", "justfile", ".goreleaser.yml", "release.yml"],
-    "governance": ["LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CODEOWNERS", "GOVERNANCE.md"],
+    "security": ["SECURITY.md", "deny.toml", ".github/dependabot.yml", "CODEOWNERS",
+                 ".git-secrets"],
+    "release": ["Makefile", "justfile", ".goreleaser.yml", "release.yml", "release.toml",
+                "RELEASES.md", "RELEASE.md", "CHANGELOG.md", "SHA256SUMS",
+                "SBOM.spdx.json", "SBOM.cyclonedx.json", "sbom.spdx.json", "sbom.cyclonedx.json",
+                "PGP-KEY.asc", "cosign.pub"],
+    # Raw governance evidence. Presence does not establish maturity or applicability.
+    "governance": ["LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CODEOWNERS", "GOVERNANCE.md",
+                   "CHARTER.md", "MAINTAINERS.md", "SPECIFICATION.md", "VERSIONING.md",
+                   "DEPRECATED.md"],
+    "engineering_hygiene": ["rust-toolchain.toml", "rust-toolchain", ".gitlint",
+                            ".git-blame-ignore-revs"],
     "operations": ["RUNBOOK.md", "OPERATIONS.md", "SLO.md", "SUPPORT.md"],
     "accessibility": ["ACCESSIBILITY.md", "VPAT.md"],
+    # Raw policy evidence; content and applicability require owner review.
+    "privacy_compliance": ["PRIVACY.md", "AI_POLICY.md", "GDPR.md", "DATA_RETENTION.md",
+                           "DPA.md", "SUBPROCESSORS.md"],
     "ai_assurance": ["MODEL_CARD.md", "AI_RISK.md", "EVALS.md"],
+    # License evidence is not a legal classification.
+    "licensing": ["LICENSE-EE", "LICENSE-3rdparty.csv", "license-tool.toml",
+                  "LICENSE-APACHE", "LICENSE-MIT", "LICENSE-MPL", "denied_words.txt",
+                  "LICENSE.community", "LICENSE.enterprise", "THIRD-PARTY", "NOTICE"],
+    # Contract artifacts are candidates; they do not prove a public contract or gate.
+    "api_contract": ["buf.yaml", "buf.gen.yaml", "buf.lock", "public-api-snapshot.json",
+                     "swagger.json", "swagger.yaml", ".openapi-generator.yaml"],
     "guardrails": [
         ".guardrails/INDEX.md",
         ".guardrails/memory.md",
@@ -459,15 +478,13 @@ def rel(root: Path, path: Path) -> str:
     return str(path.relative_to(root))
 
 
-def marker_exists(root: Path, marker: str) -> list[str]:
+def marker_exists(root: Path, marker: str, files_by_name: dict[str, list[Path]]) -> list[str]:
     path = root / marker
     if path.exists():
         return [marker]
     matches: list[str] = []
     if "/" not in marker:
-        for found in root.rglob(marker):
-            if any(part in IGNORE_DIRS for part in found.parts):
-                continue
+        for found in files_by_name.get(marker, []):
             matches.append(rel(root, found))
     return sorted(matches)[:20]
 
@@ -496,6 +513,9 @@ def main() -> int:
 
     root = Path(args.root).resolve()
     files = list(iter_files(root))
+    files_by_name: dict[str, list[Path]] = {}
+    for path in files:
+        files_by_name.setdefault(path.name, []).append(path)
 
     languages: dict[str, int] = {key: 0 for key in LANG_EXTS}
     language_file_samples: dict[str, list[str]] = {key: [] for key in LANG_EXTS}
@@ -510,7 +530,7 @@ def main() -> int:
     for group, markers in MARKERS.items():
         hits: list[str] = []
         for marker in markers:
-            hits.extend(marker_exists(root, marker))
+            hits.extend(marker_exists(root, marker, files_by_name))
         evidence[group] = sorted(set(hits))[:30]
 
     test_files = [

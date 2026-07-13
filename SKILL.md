@@ -18,7 +18,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Validate scope and evidence freshness before inheriting any prior PASS.
 
 2. **Require explicit profile decisions**
-   - Before initialization, require product type, development mode, distribution model, target market, criticality, target maturity, assessed scope, and whether this is an AI system.
+   - Before initialization, require product type, development mode, distribution model, target market, criticality, target maturity, assessed scope, public contracts, build topology, persistent-state model, external-contribution model, and whether this is an AI system.
    - Never infer legal/regulatory applicability or target market from repository keywords.
 
 3. **Initialize the v2 framework**
@@ -34,6 +34,8 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      --market <explicit> --criticality <explicit> \
      --data-sensitivity <explicit> --deployment-model <explicit> \
      --support-model <explicit> --primary-user <explicit> \
+     --public-contract <explicit> --build-topology <explicit> \
+     --persistent-state <explicit> --external-contributions <explicit> \
      --no-ai-system --scope-mode <explicit> \
      --legal-profile <explicit>
    ```
@@ -104,7 +106,8 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 
 10. **Learn and evolve**
    - Feed incidents, escaped defects, SLO breaches, customer outcomes, vulnerability response, and repeated review findings back into project controls and durable memory.
-   - Promote portable lessons only when they are project-agnostic and backed by repeated evidence.
+   - Record external-project observations with immutable revision, evidence paths, profile, applicability boundary, and counterexamples.
+   - Promote portable lessons only after independent corroboration or a stable formal standard, explicit target applicability, owner review, runnable verification, and false-positive tests.
 
 ## Output Shape
 

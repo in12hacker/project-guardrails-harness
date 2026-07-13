@@ -169,6 +169,50 @@ InterfaceContractHarness:
 
 Check that public interfaces are shaped by real consumers, use typed domain boundaries, separate wire DTOs from domain types, and avoid long-lived compatibility wrappers.
 
+## API Stability Checks
+
+Make semantic versioning falsifiable instead of asserted. A library or service
+that claims semver without an executable check is relying on reviewer memory.
+
+```text
+APIStabilityHarness:
+  selected_public_contracts:       # explicit profile decision
+  public_api_snapshot:              # rustdoc-json + public-api diff (library); equivalent per ecosystem
+  api_equals_version:               # API version bound to binary/artifact version (service/VMM mode)
+  openapi_breaking_check:           # oasdiff / buf breaking:FILE for HTTP/gRPC contracts
+  semver_enforcement:               # cargo-smart-release / semantic-release / release-please
+  consumer_contract_test:           # downstream-consumer-driven contract test
+  per_crate_changelog:              # each publishable crate has its own CHANGELOG when independently versioned
+```
+
+Design rules:
+
+- pick the form that matches the product: a library uses a public-API snapshot
+  diff; a versioned service binds API version to artifact version; an
+  HTTP/gRPC API uses a breaking-change detector on the spec;
+- a snapshot gate fails the PR when the public surface changes without a
+  matching version bump or an explicit `bless`;
+- per-crate changelogs are required when crates are independently versioned and
+  published, not optional documentation;
+- a breaking change that ships without the gate catching it is a harness gap,
+  not just a release incident.
+
+## Workspace Build Boundary Checks
+
+For workspaces that mix build forms (userspace + `#![no_std]`/kernel, host +
+cross target, std + `alloc`-only), encode the boundary so the default build and
+CI matrix are self-describing.
+
+```text
+WorkspaceBoundaryHarness:
+  selected_build_topology:         # explicit profile decision
+  default_members_declaration:      # default-members / exclude in the workspace manifest
+  per_target_build_matrix:          # CI builds every declared target/form, not just the default
+  shared_abi_crate:                 # single -common crate owning repr(C)/wire types both sides consume
+  cross_form_dependency_rule:       # static check forbidding userspace→kernel/no_std reverse deps
+  build_form_isolation_test:        # building one form does not silently compile the other
+```
+
 ## Documentation Deliverable Checks
 
 ```text
@@ -317,6 +361,34 @@ VersionCoverageHarness:
 
 Coverage exclusions are allowed only when they are generated, platform-impossible in PR, or replaced by stronger real-stack/product evidence. They need owners and review dates.
 
+## Schema and Protocol Evolution Checks
+
+For products with persistent state (databases, indexed stores, on-disk formats)
+or versioned wire contracts (protobuf, OpenAPI, gRPC), a schema change is a
+release risk that a unit test cannot catch. Add an evolution harness so
+forward/backward compatibility is proven, not asserted.
+
+```text
+SchemaEvolutionHarness:
+  selected_persistent_state:       # explicit profile decision
+  breaking_change_detection:        # buf breaking:FILE / oasdiff / sqlx migrate check / custom format-diff
+  forward_backward_compat_test:     # declarative cross-version upgrade + downgrade against fixtures
+  data_migration_safety:            # N-1→N forward migration + N→N-1 rollback, with content checksums
+  persistence_change_classification:# change classified: forward-compat / breaking / data-correcting
+  fixture_checksum_verification:    # SHA-256 of canonical fixtures to detect silent format drift
+```
+
+Design rules:
+
+- the breaking-change detector runs on the schema/contract source, not only on
+  generated code;
+- a cross-version upgrade test boots the old version's persisted state, upgrades,
+  and asserts behavior; a downgrade test proves rollback is possible (or records
+  the irreversible residual risk);
+- a data-correcting migration (not just schema-additive) needs a separate,
+  replayable test because it transforms existing rows/documents;
+- a breaking change that lands without the detector catching it is a harness gap.
+
 ## Product Acceptance Rules
 
 Use the real product stimulus:
@@ -399,3 +471,26 @@ artifact verification.
 Use real environments where the risk requires them. Synthetic, mock, or
 document-only evidence must identify the residual gap and cannot satisfy a
 control that explicitly requires product or production execution.
+
+## AI-Assisted Contribution Harness
+
+Distinct from product AI-assurance evidence: this harness verifies that a
+project which explicitly accepts or restricts external contributions has codified how AI-assisted
+(copilot, agentic, generated) contributions are disclosed, reviewed, and
+licensed. Applicability comes from `external_contributions`, not distribution or
+`ai_system`. Foundation and project policies are comparative evidence, not a
+universal mandatory stance.
+
+```text
+AIContributionHarness:
+  selected_policy:                  # allowed | restricted | prohibited
+  contribution_policy_location:     # CONTRIBUTING.md / AI_POLICY.md / DCO / CLA referencing AI
+  disclosure_requirement:           # none | encouraged | required (with tag/keyword)
+  review_standard_parity_check:     # CI/label rule: AI-tagged PRs are not exempted from any gate
+  licensing_attestation:            # DCO/CLA covers AI output; contributor attests rights
+  documented_or_not_applicable:     # explicit "no special policy" is valid; silence is not
+```
+
+Evidence is the policy document plus the CI/label configuration that enforces
+parity. A policy that exists only in prose, with no gate treating AI-tagged PRs
+identically to human PRs, is advisory, not a harness.

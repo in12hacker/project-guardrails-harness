@@ -76,7 +76,7 @@ If you keep the skill somewhere else, run the scripts by explicit path or set
 ## Quick Start
 
 Initialization requires explicit product, market, criticality, development,
-distribution, and maturity choices:
+distribution, maturity, contract, build, state, and contribution choices:
 
 ```bash
 python3 scripts/init_quality_framework.py --root /path/to/project \
@@ -90,6 +90,10 @@ python3 scripts/init_quality_framework.py --root /path/to/project \
   --deployment-model self_hosted \
   --support-model community \
   --primary-user developer \
+  --public-contract service_api \
+  --build-topology single_form \
+  --persistent-state database \
+  --external-contributions accepted \
   --no-ai-system \
   --scope-mode full_repo \
   --legal-profile none_identified \

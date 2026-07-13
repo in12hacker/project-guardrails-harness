@@ -19,11 +19,18 @@ require organizational or external signers.
 - cross-audit reads source evidence, not only the self-audit summary;
 - audit actor, tool/model version, prompt/rule-set version, commit, scope, and
   evidence digest are recorded;
+- an actor display label does not prove independence; resolve it to a trusted
+  authority identity and execution context, and treat relabeling of the same
+  identity as the same actor;
 - disagreement produces `DISPUTED`, never an automatic pass;
 - a signer cannot override a deterministic failed mandatory control;
 - evidence expires when affected code/config/artifacts change or its explicit
   validity window ends;
 - secrets and sensitive output are redacted before evidence persistence.
+
+Cross-audit re-evaluates the self-audit's original redacted evidence and its
+bindings. Merely rerunning a command under another label or reading only a
+summary does not establish an independent conclusion.
 
 ## Authorization Boundary
 
@@ -46,6 +53,23 @@ user separately authorizes that control. Artifact registries and deployment
 systems use project-configured `remote` or `privileged` argv controls because
 the skill must not guess provider, account, artifact, or environment identity.
 
+## Environment Capability Gate
+
+Declare required capabilities before execution. The core vocabulary is
+`local_unprivileged`, `root`, `cap_bpf`, `docker`, `network`, `secret`,
+`external_service`, `remote_ci`, `device`, and `gpu`; projects may add
+namespaced capabilities.
+
+- missing declared capability: `BLOCKED`, with the rerun environment recorded;
+- false or contradictory environment attestation: framework `FAIL` or a typed
+  authorization/environment blocker, according to the failed assertion;
+- successful preflight followed by a failed product assertion: `FAIL`;
+- successful preflight and product assertion: `PASS`.
+
+Use deterministic preflight commands or runner attestations. Never infer a
+missing environment from arbitrary stderr text. Accept remote evidence only
+when identity, authorization, scope, digests, environment, and freshness match.
+
 ## Claim Enforcement
 
 For a target maturity:
@@ -56,3 +80,8 @@ For a target maturity:
 4. require the audit stages selected by the manifest;
 5. bind the conclusion to commit and artifact digests;
 6. refuse the claim if any evidence is missing, stale, blocked, failed, or disputed.
+
+Project and release claims always use absolute evaluation. Task and phase
+outcomes use their registered affected controls and exit criteria without
+changing control statuses. Unreviewed inherited evidence, policy conflict, or a
+missing capability blocks the affected conclusion with a typed reason.

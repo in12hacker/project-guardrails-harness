@@ -30,8 +30,12 @@ DevelopmentMode:
 ```
 
 - AI-led greenfield: generate the complete quality skeleton before feature work.
-- AI-led brownfield: run one quality-convergence campaign in independently
-  verified phases; do not use one unreviewable big-bang change.
+- AI-led brownfield: run one identified quality-convergence campaign in
+  independently verified phases; one campaign is a governance envelope, not
+  one run, commit, pull request, or big-bang change. While it is active, allow
+  only registered convergence tasks. Admit an urgent security or correctness
+  fix only through an owner-approved campaign revision; do not use it as a
+  general feature escape hatch.
 - Human greenfield: establish the skeleton early, with owner-controlled
   sequencing and strict claim semantics.
 - Human brownfield: migrate by module and quality dimension while the global
@@ -65,6 +69,23 @@ an automatic fallback for missing infrastructure.
 
 ## Claim Policy
 
+Keep observations, statuses, outcomes, and claims separate:
+
+```text
+Observation
+  -> ControlStatus
+  -> TaskOrPhaseOutcome
+  -> ProjectOrReleaseClaim
+```
+
+A task or phase may be `COMPLETED` while an applicable debt control remains
+`FAIL`. Completion never writes a different control status. Project and release
+claims use absolute evaluation and require every applicable control to be a
+current `PASS`. Do not introduce `RATCHET_PASS` or `INHERITED_PASS` statuses;
+ratchets evaluate an observation delta, and inheritance records evidence
+provenance. `applies=false` excludes a control only when it is bound to an
+owner-approved applicability decision with exact scope and rationale.
+
 ```text
 QualityClaim:
   claim:
@@ -90,8 +111,17 @@ QualityClaim:
 ## Task vs Project Completion
 
 A debt-removal or framework-adoption task can be complete while the project is
-still `not_ready`. The task claim must say what scope was improved and must not
-imply project or release readiness.
+still `not_ready`. Record a task outcome, not a task maturity claim. The outcome
+must identify its affected scope and controls and must not imply project or
+release readiness. Debt removal requires no new violations and measurable
+reduction (`fixed>0` or closure of named controls). Inventory or framework
+adoption may complete without reducing debt only when its declared inventory or
+coverage exit criterion is satisfied.
+
+An AI brownfield task must belong to the current campaign revision and a named
+phase. A material change to the baseline, assessed scope, target maturity,
+registry, ordering, or exit criteria requires a campaign revision and
+invalidates affected outcomes.
 
 Human brownfield feature work may use a task claim only when all affected
 controls pass in every required audit stage and measured debt does not grow.

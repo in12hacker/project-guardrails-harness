@@ -277,6 +277,16 @@ def main() -> int:
         if args.claim_scope == "task" and not args.control:
             print("FAIL [QF-CLAIM]: task claims require explicit --control values", file=sys.stderr)
             return 2
+        if (
+            args.claim_scope == "task"
+            and manifest["project"]["development_mode"] == "ai_brownfield"
+        ):
+            print(
+                "BLOCKED [QF-TASK]: AI brownfield task outcomes require "
+                "registered campaign revision and phase context",
+                file=sys.stderr,
+            )
+            return 1
         if args.claim_scope == "project":
             controls = all_controls
         required = set(manifest["audit_policy"]["required_stages"])
@@ -316,6 +326,11 @@ def main() -> int:
             return 1
         if args.claim_scope == "task":
             scope_label = f"task controls {', '.join(sorted(applicable_ids))}"
+            print(
+                f"COMPLETED [QF-TASK]: controls support {scope_label} at commit "
+                f"{commit} by {', '.join(sorted(required))}; project maturity is unchanged"
+            )
+            return 0
         else:
             scope_label = "whole project" if scope["mode"] == "full_repo" else "assessed subproject only"
         print(f"PASS [QF-CLAIM]: {target} is supported for {scope_label} at commit {commit} by {', '.join(sorted(required))}")

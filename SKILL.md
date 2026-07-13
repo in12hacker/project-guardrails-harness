@@ -51,6 +51,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 6. **Develop under task-scoped quality controls**
    - Before editing, identify affected requirements, controls, owners, and gates.
    - During work, create missing scripts, CI, configs, tests, docs, dependencies, or scaffolding needed by applicable controls.
+   - In AI brownfield mode, work only inside the registered convergence campaign revision and phase. Record task/phase `COMPLETED` outcomes separately from control statuses; do not use an ordinary feature task as a ratchet exception.
    - Installing dependencies, using secrets/paid services, remote or production mutation, and privileged execution require separate user authorization.
 
 7. **Execute controls and record evidence**
@@ -68,7 +69,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 
 9. **Make or refuse the claim**
    - `--claim` succeeds only when every applicable control for the target maturity has a current PASS and every required audit stage has a passing run for the same commit.
-   - Human brownfield feature work uses `--claim --claim-scope task --control <affected-id>...`; this proves only the named task controls and never changes failed global readiness.
+   - Human brownfield feature work may use `--claim --claim-scope task --control <affected-id>...`; success records only a scoped task outcome and never changes failed global readiness. AI brownfield task evaluation requires registered campaign context and is rejected until that context is present.
 
    ```bash
    python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --claim
@@ -121,7 +122,9 @@ Keep `INDEX.md` under ~150 lines and each file under ~300 lines; put the most sa
 
 ## Non-Negotiables
 
-- Do not claim task completion unless all applicable task-scoped controls are current `PASS`.
+- Do not record task or phase `COMPLETED` unless all affected non-debt controls
+  are current `PASS` and its declared exit policy is satisfied. Never rewrite a
+  failed debt control as `PASS` to complete a task.
 - Do not claim a maturity level, project completion, mergeability, or release readiness unless every applicable control and required audit stage for that claim is current `PASS` for the same commit and scope.
 - Do not convert `FAIL`, `BLOCKED`, `TODO`, `DISPUTED`, or `STALE` into a passing claim. Known debt remains blocking for project maturity even when verified human-project feature work may continue.
 - Do not infer target market, legal obligations, regulatory applicability, or target maturity. Require explicit project selection.

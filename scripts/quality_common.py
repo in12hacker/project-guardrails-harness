@@ -231,6 +231,13 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
                 errors.append(f"{prefix}.{field} must be a non-empty string list")
         if not isinstance(control.get("applies"), bool):
             errors.append(f"{prefix}.applies must be boolean")
+        elif control.get("applies") is False:
+            rationale = control.get("applicability_rationale")
+            confirmer = control.get("applicability_confirmed_by")
+            if not isinstance(rationale, str) or not rationale.strip():
+                errors.append(f"{prefix}.applicability_rationale is required when applies=false")
+            if not isinstance(confirmer, str) or not confirmer.strip():
+                errors.append(f"{prefix}.applicability_confirmed_by is required when applies=false")
         if control.get("required_from_maturity") not in MATURITY_LEVELS:
             errors.append(f"{prefix}.required_from_maturity is invalid")
         execution = control.get("execution")

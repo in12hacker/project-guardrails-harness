@@ -78,11 +78,14 @@ Reject or rewrite a candidate when:
 
 ## Ratcheting And AI-Generated Code (2026)
 
-- **Ratchet = measured convergence, not grandfathering.** New debt always fails.
-  Known debt also fails the project maturity/release claim until fixed. In a
-  human brownfield project, policy may still allow a scoped feature task when
-  all affected controls pass and measured debt does not grow; this does not
-  change the known violations to `PASS` or make the project ready.
+- **Ratchet = observation-delta evaluation, not a control status.** New debt
+  always fails. `new=0` proves only no regression; it does not prove debt
+  closure. Known debt also fails the project maturity/release claim until fixed.
+  An AI brownfield task must belong to the active campaign; ordinary feature
+  work is not a task-claim escape hatch. Human brownfield policy may allow a
+  scoped feature outcome when all affected controls pass and measured debt does
+  not grow, without changing known violations to `PASS` or making the project
+  ready.
 - **Baseline = cleanup inventory, not approval (mandatory).** A baseline or allowlist must make known debt visible and measurable. It must NOT turn a detected violation into proof of acceptability. Any violation (baselined or new) must FAIL the gate; the baseline only classifies known vs new for reporting clarity. The only way to PASS is to actually fix violations. Separate design-scope exemptions (the rule truly does not apply, declared in code with a reason) from cleanup debt (the rule applies and must be fixed).
 - **Turn decisions into fitness functions.** An ADR or architecture rule should be enforced, not merely documented: render it as a runnable check (a test, a static-analysis rule, an OPA policy) that fails the PR when violated. A doc claim is a hypothesis; a runnable check is evidence.
 - **Verification, not approval, for AI-generated code.** Human approval does not scale against AI-generated volume; the gate is that the change satisfies spec/tests/contracts/owners, not that a human rubber-stamped it. Code Health (complexity) can flag code too tangled for safe automated refactoring.
@@ -112,23 +115,20 @@ Refactor pressure should cite a violated readiness dimension, owner boundary, ru
 
 ## Baseline And Allowlist Semantics
 
-```text
-BaselineAudit:
-  baseline_file:
-  rule_or_check:
-  known_violations:
-  new_violations:
-  design_scope_exemptions:
-  cleanup_owner:
-  shrink_plan:
-  pass_fail_semantics:
-```
+Keep three records separate: `DebtObservation` reports immutable counts and
+baseline/rule digests; `CleanupDebt` records an applicable violation with owner,
+shrink plan, and delete-by; `DesignScopeExemption` records approved
+non-applicability for exact scope with an alternative safety control and review
+lifecycle. Risk acceptance is a fourth business decision and never changes a
+control status.
 
 Guidance:
 
 - design-scope exemptions live near the code or rule with a reason;
 - cleanup debt lives in a visible inventory with owner and review/delete path;
 - baseline updates should normally shrink the inventory or explicitly explain a profile change;
+- a baseline revision that grows debt is a regression and cannot satisfy a
+  convergence task;
 - new violations must fail; baselined (known) violations must also fail (the baseline is a todo list, not permission);
 - a green gate with hidden growing debt is stale evidence, not maturity;
 - during human brownfield transition, a separate task-scope policy may permit
@@ -141,6 +141,11 @@ Guidance:
 Rule maturity describes how a rule is enforced; control status describes the
 current objective result. Keep them separate.
 
+Observation, control status, task/phase outcome, and project/release claim are
+different objects. Task completion cannot write a debt control to `PASS`, and
+inherited evidence cannot create a new status. A project claim remains failed
+while applicable cleanup debt remains.
+
 - `PASS` and approved `NOT_APPLICABLE` are terminal observations, but only
   `PASS` satisfies an applicable control.
 - `FAIL`, `BLOCKED`, `TODO`, `DISPUTED`, and `STALE` block the associated claim.
@@ -150,6 +155,14 @@ current objective result. Keep them separate.
   decision required by a maturity profile.
 - a stable standard update triggers applicability review and controlled
   migration; drafts may inform planning but cannot silently become mandatory.
+
+## Federated Rule Lifecycle
+
+Track each project-rule mapping as `current|stale|disputed|unmapped`. A source
+digest change makes it stale until review. A same-tier or semantic-owner
+conflict makes it disputed and blocks the affected claim. An unmapped mandatory
+project rule is a framework failure. Generated Markdown is a derived view and
+must never resolve or overwrite a federation conflict.
 
 ## Continuous Update Loop
 

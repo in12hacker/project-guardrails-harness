@@ -46,19 +46,23 @@ Use it when asked to:
 
 ## Install
 
-This repo's root **is** the skill folder. Install it into a project's skills
-directory:
+This repo's root **is** the skill folder. Prefer one central clone and a
+user-level symlink so every project reads the current Skill without committing
+it or coupling project CI/release to it:
 
 ```bash
-# from the target project root
 git clone https://github.com/in12hacker/project-guardrails-harness.git \
-  .claude/skills/project-guardrails-harness
+  ~/work/project-guardrails-harness
+mkdir -p ~/.claude/skills
+ln -s ~/work/project-guardrails-harness \
+  ~/.claude/skills/project-guardrails-harness
 ```
 
-…or keep it as a central clone and symlink:
+For an intentionally project-pinned copy, clone it into the project and manage
+that version explicitly. Do not commit an absolute machine-local symlink:
 
 ```bash
-ln -s /path/to/project-guardrails-harness \
+git clone https://github.com/in12hacker/project-guardrails-harness.git \
   <project>/.claude/skills/project-guardrails-harness
 ```
 

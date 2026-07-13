@@ -19,6 +19,7 @@ class QualityFrameworkTest(unittest.TestCase):
     def make_project(
         self, extra_files: dict[str, str] | None = None,
         init_args: tuple[str, ...] = (),
+        development_mode: str = "human_brownfield",
     ) -> Path:
         temp = Path(tempfile.mkdtemp(prefix="quality-framework-test-"))
         (temp / "README.md").write_text("# Fixture\n", encoding="utf-8")
@@ -34,7 +35,7 @@ class QualityFrameworkTest(unittest.TestCase):
         result = subprocess.run(
             [
                 sys.executable, str(INIT), "--root", str(temp),
-                "--development-mode", "human_brownfield",
+                "--development-mode", development_mode,
                 "--target-maturity", "prototype",
                 "--product-type", "cli",
                 "--distribution-model", "open_source",
@@ -93,6 +94,63 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         self.assertEqual(task.returncode, 0, task.stderr)
         self.assertIn("task controls", task.stdout)
+        self.assertIn("COMPLETED [QF-TASK]", task.stdout)
+        self.assertIn("project maturity is unchanged", task.stdout)
+
+    def test_ai_brownfield_task_requires_registered_campaign_context(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        control_id = "QF.FRAMEWORK.MANIFEST"
+        for stage in ("self", "cross", "release_authority"):
+            result = self.run_evaluator(
+                project, "--run", "--audit-stage", stage,
+                "--actor", f"fixture-{stage}", "--control", control_id,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        task = self.run_evaluator(
+            project, "--claim", "--claim-scope", "task", "--control", control_id,
+        )
+        self.assertEqual(task.returncode, 1)
+        self.assertIn("registered campaign revision and phase context", task.stderr)
+
+    def test_unconfirmed_applies_false_is_a_framework_error(self) -> None:
+        project = self.make_project()
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        registry["controls"][0]["applies"] = False
+        registry["controls"][0].pop("applicability_rationale", None)
+        registry["controls"][0].pop("applicability_confirmed_by", None)
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(sync.returncode, 2)
+        self.assertIn("applicability_rationale is required", sync.stdout + sync.stderr)
+        claim = self.run_evaluator(project, "--claim")
+        self.assertEqual(claim.returncode, 2)
+        self.assertIn("applicability_rationale is required", claim.stderr)
+
+    def test_generated_guidance_qualifies_project_rule_authority(self) -> None:
+        project = self.make_project({
+            "AGENTS.md": "# Project Rules\n\n- Run the project gate.\n",
+        })
+        profile = (project / ".guardrails" / "profile.md").read_text()
+        index = (project / ".guardrails" / "INDEX.md").read_text()
+        self.assertNotIn("single source of truth", profile)
+        self.assertNotIn("the **authoritative source of truth**", index)
+        self.assertIn("project-specific domain semantics", profile)
+        self.assertIn("portable Skill owns claim", profile)
+        self.assertIn("project domain semantics", index)
+        self.assertIn("claim/evidence meta-semantics", index)
+        self.assertIn("Conflicts block", index)
+
+    def test_contract_separates_observation_status_outcome_and_claim(self) -> None:
+        lifecycle = (ROOT / "references" / "05-delivery-lifecycle.md").read_text()
+        audit = (ROOT / "references" / "35-audit-and-evidence.md").read_text()
+        self.assertIn("Observation\n  -> ControlStatus\n  -> TaskOrPhaseOutcome", lifecycle)
+        self.assertIn("Do not introduce `RATCHET_PASS` or `INHERITED_PASS`", lifecycle)
+        self.assertIn("actor display label does not prove independence", audit)
+        self.assertIn("Environment Capability Gate", audit)
 
     def test_registry_change_invalidates_graph_and_prior_evidence(self) -> None:
         project = self.make_project()

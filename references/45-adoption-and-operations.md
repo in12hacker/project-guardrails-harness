@@ -18,9 +18,17 @@ human-led projects may continue feature work while convergence proceeds when:
 - the feature's own requirements, controls, and tests pass;
 - debt and dependency interactions are visible in the ledger.
 
-AI-led brownfield projects should use a dedicated convergence campaign with
-small verified phases. Human-led projects should migrate by module and quality
-dimension to control coordination cost.
+AI-led brownfield projects use one identified convergence campaign containing
+bounded phases and registered tasks. The campaign may span many commits and
+pull requests. Material drift in baseline, scope, target maturity, registry, or
+exit criteria increments its revision and invalidates affected outcomes; an
+unrelated target or baseline starts a new campaign. Ordinary feature tasks are
+not admitted while the campaign is active. An urgent security or correctness
+fix requires an owner-approved scope amendment, affected-control evaluation,
+`new=0`, and independent audit. Human-led projects migrate by module and quality
+dimension to control coordination cost. After convergence, normal continuous
+hard gates remain active; the campaign is one-time bootstrap governance, not a
+one-time quality check.
 
 ## Production Readiness
 

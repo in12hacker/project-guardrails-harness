@@ -1,7 +1,7 @@
 # Control And Traceability Model
 
-The quality framework has three machine-maintained sources of truth and one
-derived graph.
+The quality framework has one portable meta-contract, federated project truth,
+three machine-maintained project records, and derived guidance.
 
 ## Contents
 
@@ -25,6 +25,14 @@ and governing a YAML parser dependency.
 The manifest defines project identity, selected profile, assessed scope,
 maturity target, authority boundaries, audit requirements, and applicable
 overlays. Missing mandatory decisions block initialization.
+
+The Skill meta-contract owns status, claim, evidence, audit, authorization, and
+campaign semantics. The project profile owns applicability. Federated project
+rules own domain rule IDs, owners, thresholds, commands, and reject conditions.
+Generated Markdown and the traceability graph are derived views and cannot
+override those owners. An AI brownfield task or phase outcome requires a
+registered campaign revision; a profile cannot redefine `PASS` or weaken claim
+semantics.
 
 ## Control Registry
 
@@ -58,8 +66,16 @@ Rules:
   manual evidence path, and maturity level;
 - standard IDs include versions when the upstream identifier can move;
 - deterministic controls and model judgment are separate;
-- `NOT_APPLICABLE` requires a recorded rationale and human confirmation;
+- `NOT_APPLICABLE` requires an owner-approved applicability decision with exact
+  scope and rationale; a bare `applies=false` is a framework error;
 - one control may satisfy several requirements, but the mappings remain visible.
+
+Capability requirements, federated mappings, cleanup debt, and design-scope
+exemptions are distinct records. A mapping is
+`current|stale|disputed|unmapped`: source digest drift makes it `stale`, while a
+same-tier or semantic-owner conflict makes it `disputed`. A disputed mapping
+emits `BLOCKED` with `blocker_kind=policy_conflict`; an unmapped mandatory
+project rule is a framework failure.
 
 Current status and `last_verified` are derived from the evidence ledger for the
 requested commit, workspace, scope, registry version, maturity, and audit stage.
@@ -74,6 +90,12 @@ artifact digest, status, and audit stage. Summaries are not evidence unless
 they link to the underlying result. The hash chain is tamper-evident, not a
 cryptographic signature; profiles that need non-repudiation must also sign or
 store the ledger in an independently controlled system.
+
+Inherited evidence is provenance, not a control status. Treat it as
+provisional until a current verifier confirms matching control, scope, input,
+dependency, environment, and artifact digests. Cross-audit must be able to read
+the original redacted output, not only its digest. Privileged, manual, or
+external evidence must carry an explicit freshness policy and expiry.
 
 ## Traceability Graph
 
@@ -105,3 +127,12 @@ The generated framework must test itself:
 - false-positive/false-negative fixtures for custom rules;
 - golden repositories for every supported ecosystem;
 - execution timeout, output-size, and secret-redaction behavior.
+
+## Semantic Closure
+
+Any behavior that can change a claim needs all five representations: one named
+semantic owner, a machine-readable field, deterministic validation/evaluation,
+positive and adversarial drift tests, and generated guidance derived from the
+machine model. If any representation is missing, treat the behavior as an
+unenforced design intent; a project adapter may report observations but must not
+invent the missing status or claim policy.

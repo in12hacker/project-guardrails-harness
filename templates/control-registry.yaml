@@ -1,8 +1,10 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "controls": [
     {
       "id": "QF.FRAMEWORK.MANIFEST",
+      "control_revision": "1",
+      "rule_refs": [],
       "title": "Quality profile decisions are complete",
       "dimension": "framework_governance",
       "source_standard": "project-guardrails-harness",
@@ -17,6 +19,8 @@
       "applicability_rationale": "Universal framework self-governance control.",
       "required_from_maturity": "prototype",
       "scope": [".guardrails/quality-manifest.yaml"],
+      "evaluation_mode": "absolute",
+      "required_capability_refs": [],
       "execution": {
         "type": "file_exists",
         "path": ".guardrails/quality-manifest.yaml",
@@ -24,5 +28,10 @@
       },
       "evidence_required": ["current manifest file"]
     }
-  ]
+  ],
+  "capabilities": [],
+  "baselines": [],
+  "cleanup_debts": [],
+  "design_scope_exemptions": [],
+  "federated_rule_mappings": []
 }

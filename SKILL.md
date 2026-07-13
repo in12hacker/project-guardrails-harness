@@ -23,6 +23,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 
 3. **Initialize or migrate the framework**
    - Run the bundled initializer with explicit choices. It scans repository evidence, renders human guidance, and creates the three machine sources of truth.
+   - For an existing schema v1 framework, run `scripts/migrate_quality_framework.py --root .`; prior evidence remains provenance and must be re-evaluated against v2 digests.
    - Greenfield projects get the skeleton before feature development. Brownfield projects remain globally `not_ready` until debt is eliminated, but verified convergence tasks may complete.
 
    ```bash

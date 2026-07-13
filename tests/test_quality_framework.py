@@ -13,6 +13,7 @@ INIT = ROOT / "scripts" / "init_quality_framework.py"
 EVALUATE = ROOT / "scripts" / "evaluate_quality.py"
 SCAN = ROOT / "scripts" / "scan_project.py"
 SYNC = ROOT / "scripts" / "sync_traceability.py"
+MIGRATE = ROOT / "scripts" / "migrate_quality_framework.py"
 
 
 class QualityFrameworkTest(unittest.TestCase):
@@ -73,6 +74,71 @@ class QualityFrameworkTest(unittest.TestCase):
         graph = json.loads((guardrails / "traceability-graph.json").read_text())
         registry = json.loads((guardrails / "control-registry.yaml").read_text())
         self.assertEqual(len(graph["links"]), len(registry["controls"]))
+        self.assertEqual("2.0", graph["schema_version"])
+        self.assertEqual("2.0", registry["schema_version"])
+        manifest = json.loads((guardrails / "quality-manifest.yaml").read_text())
+        self.assertIn("claim_policies", manifest)
+        self.assertIn("development_policy", manifest)
+
+    def test_v1_framework_migrates_without_reusing_prior_claim_evidence(self) -> None:
+        project = self.make_project()
+        guardrails = project / ".guardrails"
+        manifest_path = guardrails / "quality-manifest.yaml"
+        registry_path = guardrails / "control-registry.yaml"
+        ledger_path = guardrails / "evidence-ledger.json"
+        graph_path = guardrails / "traceability-graph.json"
+
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schema_version"] = "1.0"
+        manifest.pop("development_policy")
+        manifest.pop("claim_policies")
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+        registry = json.loads(registry_path.read_text())
+        registry["schema_version"] = "1.0"
+        for field in (
+            "capabilities", "baselines", "cleanup_debts",
+            "design_scope_exemptions", "federated_rule_mappings",
+        ):
+            registry.pop(field)
+        for control in registry["controls"]:
+            control.pop("control_revision")
+            control.pop("rule_refs")
+            control.pop("evaluation_mode")
+            control.pop("required_capability_refs")
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+
+        ledger = json.loads(ledger_path.read_text())
+        ledger["schema_version"] = "1.0"
+        ledger.pop("claims")
+        ledger_path.write_text(json.dumps(ledger, indent=2) + "\n")
+        graph = json.loads(graph_path.read_text())
+        graph["schema_version"] = "1.0"
+        graph_path.write_text(json.dumps(graph, indent=2) + "\n")
+
+        migrated = subprocess.run(
+            [sys.executable, str(MIGRATE), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(migrated.returncode, 0, migrated.stderr)
+        self.assertIn("schema 1.0 -> 2.0", migrated.stdout)
+        self.assertEqual("2.0", json.loads(manifest_path.read_text())["schema_version"])
+        migrated_registry = json.loads(registry_path.read_text())
+        self.assertEqual("absolute", migrated_registry["controls"][0]["evaluation_mode"])
+        self.assertEqual([], json.loads(ledger_path.read_text())["claims"])
+        claim = self.run_evaluator(project, "--claim")
+        self.assertEqual(claim.returncode, 1)
+        self.assertIn("controls without current PASS", claim.stderr)
+
+    def test_unknown_claim_critical_manifest_field_is_rejected(self) -> None:
+        project = self.make_project()
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["silent_claim_override"] = True
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        result = self.run_evaluator(project, "--claim")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("manifest.silent_claim_override is not allowed", result.stderr)
 
     def test_subset_run_cannot_satisfy_full_claim(self) -> None:
         project = self.make_project()

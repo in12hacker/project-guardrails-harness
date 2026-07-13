@@ -120,6 +120,8 @@ def control(
 ) -> dict:
     return {
         "id": control_id,
+        "control_revision": "1",
+        "rule_refs": [],
         "title": title,
         "dimension": dimension,
         "source_standard": standard,
@@ -133,6 +135,8 @@ def control(
         "applicability_rationale": "Selected by explicit project profile or repository evidence.",
         "required_from_maturity": maturity,
         "scope": scope or ["."],
+        "evaluation_mode": "absolute",
+        "required_capability_refs": [],
         "execution": execution,
         "evidence_required": evidence,
         "verification_ids": [f"VERIFY.{control_id}"],
@@ -518,7 +522,7 @@ def main() -> int:
         required_audits.append("third_party")
     scope_mode = args.scope_mode
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "project": {
             "name": args.project_name or root.name,
             "root": str(root),
@@ -556,14 +560,31 @@ def main() -> int:
             "required_stages": required_audits,
             "independent_actors": True,
         },
+        "development_policy": {
+            "active_campaign": None,
+        },
+        "claim_policies": {
+            "task": {"required_stages": ["self", "cross"]},
+            "phase": {"required_stages": ["self", "cross"]},
+            "project": {"required_stages": required_audits},
+            "release": {"required_stages": required_audits},
+        },
     }
     write_json_yaml(out_dir / "quality-manifest.yaml", manifest)
     registry = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "controls": starter_controls(scan, args),
+        "capabilities": [],
+        "baselines": [],
+        "cleanup_debts": [],
+        "design_scope_exemptions": [],
+        "federated_rule_mappings": [],
     }
     write_json_yaml(out_dir / "control-registry.yaml", registry)
-    write_json_yaml(out_dir / "evidence-ledger.json", {"schema_version": "1.0", "runs": [], "audits": []})
+    write_json_yaml(
+        out_dir / "evidence-ledger.json",
+        {"schema_version": "2.0", "runs": [], "audits": [], "claims": []},
+    )
     write_json_yaml(out_dir / "traceability-graph.json", build_traceability_graph(registry))
     print(f"initialized executable quality framework in {out_dir}")
     print("next: review applicability/owners, then run evaluate_quality.py --run")

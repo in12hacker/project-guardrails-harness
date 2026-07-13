@@ -3,20 +3,22 @@
   "$id": "https://example.invalid/project-guardrails/control-registry.schema.json",
   "title": "Quality Control Registry",
   "type": "object",
-  "required": ["schema_version", "controls"],
+  "required": ["schema_version", "controls", "capabilities", "baselines", "cleanup_debts", "design_scope_exemptions", "federated_rule_mappings"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "2.0"},
     "controls": {
       "type": "array",
       "items": {
         "type": "object",
         "required": [
-          "id", "title", "dimension", "project_requirement", "requirement_ids",
+          "id", "control_revision", "rule_refs", "title", "dimension", "project_requirement", "requirement_ids",
           "risk", "risk_ids", "verification_ids", "owner",
-          "applies", "required_from_maturity", "scope", "execution", "evidence_required"
+          "applies", "required_from_maturity", "scope", "evaluation_mode", "required_capability_refs", "execution", "evidence_required"
         ],
         "properties": {
           "id": {"type": "string", "pattern": "^[A-Z0-9][A-Z0-9._-]+$"},
+          "control_revision": {"type": "string", "minLength": 1},
+          "rule_refs": {"type": "array", "items": {"type": "string"}},
           "title": {"type": "string", "minLength": 1},
           "dimension": {"type": "string", "minLength": 1},
           "source_standard": {"type": "string"},
@@ -33,6 +35,8 @@
             "enum": ["prototype", "engineering_ready", "production_ready", "commercial_ready", "regulated_ready"]
           },
           "scope": {"type": "array", "items": {"type": "string"}},
+          "evaluation_mode": {"enum": ["absolute", "ratchet_delta"]},
+          "required_capability_refs": {"type": "array", "items": {"type": "string"}},
           "execution": {
             "type": "object",
             "required": ["type", "authorization_required"],
@@ -51,7 +55,12 @@
         },
         "additionalProperties": true
       }
-    }
+    },
+    "capabilities": {"type": "array"},
+    "baselines": {"type": "array"},
+    "cleanup_debts": {"type": "array"},
+    "design_scope_exemptions": {"type": "array"},
+    "federated_rule_mappings": {"type": "array"}
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

@@ -24,6 +24,7 @@ CONTROL_STATUSES = {
 }
 
 AUDIT_STAGES = {"self", "cross", "release_authority", "third_party"}
+SCHEMA_VERSION = "2.0"
 
 DEPENDENCY_MUTATION_PREFIXES = {
     ("npm", "install"), ("npm", "i"), ("pnpm", "install"),
@@ -64,7 +65,7 @@ def canonical_digest(data: dict[str, Any]) -> str:
 
 def build_traceability_graph(registry: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": "1.0",
+        "schema_version": SCHEMA_VERSION,
         "generated_from_registry_sha256": canonical_digest(registry),
         "links": [
             {
@@ -141,18 +142,35 @@ def maturity_applies(required_from: str, target: str) -> bool:
     return MATURITY_LEVELS.index(required_from) <= MATURITY_LEVELS.index(target)
 
 
+def unknown_fields(value: dict[str, Any], allowed: set[str], path: str) -> list[str]:
+    """Report unknown fields where silent schema extension could alter claims."""
+    return [f"{path}.{field} is not allowed" for field in sorted(set(value) - allowed)]
+
+
 def validate_manifest(manifest: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if manifest.get("schema_version") != "1.0":
-        errors.append("quality manifest schema_version must be 1.0")
+    errors.extend(unknown_fields(
+        manifest,
+        {
+            "schema_version", "project", "profile", "scope", "authority",
+            "audit_policy", "development_policy", "claim_policies",
+        },
+        "manifest",
+    ))
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"quality manifest schema_version must be {SCHEMA_VERSION}; run the migration tool")
     project = manifest.get("project")
     profile = manifest.get("profile")
     scope = manifest.get("scope")
     authority = manifest.get("authority")
     audit = manifest.get("audit_policy")
+    development_policy = manifest.get("development_policy")
+    claim_policies = manifest.get("claim_policies")
     for name, value in (
         ("project", project), ("profile", profile), ("scope", scope),
         ("authority", authority), ("audit_policy", audit),
+        ("development_policy", development_policy),
+        ("claim_policies", claim_policies),
     ):
         if not isinstance(value, dict):
             errors.append(f"manifest.{name} must be an object")
@@ -197,13 +215,40 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         errors.append("audit_policy.required_stages contains invalid or missing stages")
     if audit.get("independent_actors") is not True:
         errors.append("audit_policy.independent_actors must be true")
+    if not isinstance(development_policy.get("active_campaign"), (dict, type(None))):
+        errors.append("development_policy.active_campaign must be an object or null")
+    for claim_kind in ("task", "phase", "project", "release"):
+        policy = claim_policies.get(claim_kind)
+        if not isinstance(policy, dict):
+            errors.append(f"claim_policies.{claim_kind} must be an object")
+            continue
+        claim_stages = policy.get("required_stages")
+        if not isinstance(claim_stages, list) or not claim_stages or any(
+            stage not in AUDIT_STAGES for stage in claim_stages
+        ):
+            errors.append(f"claim_policies.{claim_kind}.required_stages is invalid")
     return errors
 
 
 def validate_registry(registry: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if registry.get("schema_version") != "1.0":
-        errors.append("control registry schema_version must be 1.0")
+    errors.extend(unknown_fields(
+        registry,
+        {
+            "schema_version", "controls", "capabilities", "baselines",
+            "cleanup_debts", "design_scope_exemptions",
+            "federated_rule_mappings",
+        },
+        "registry",
+    ))
+    if registry.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"control registry schema_version must be {SCHEMA_VERSION}; run the migration tool")
+    for collection in (
+        "capabilities", "baselines", "cleanup_debts",
+        "design_scope_exemptions", "federated_rule_mappings",
+    ):
+        if not isinstance(registry.get(collection), list):
+            errors.append(f"control registry {collection} must be an array")
     controls = registry.get("controls")
     if not isinstance(controls, list) or not controls:
         return errors + ["control registry must contain at least one control"]
@@ -229,6 +274,14 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
                 isinstance(value, str) and value for value in values
             ):
                 errors.append(f"{prefix}.{field} must be a non-empty string list")
+        if not isinstance(control.get("control_revision"), str) or not control.get("control_revision"):
+            errors.append(f"{prefix}.control_revision is required")
+        if not isinstance(control.get("rule_refs"), list):
+            errors.append(f"{prefix}.rule_refs must be an array")
+        if control.get("evaluation_mode") not in {"absolute", "ratchet_delta"}:
+            errors.append(f"{prefix}.evaluation_mode is invalid")
+        if not isinstance(control.get("required_capability_refs"), list):
+            errors.append(f"{prefix}.required_capability_refs must be an array")
         if not isinstance(control.get("applies"), bool):
             errors.append(f"{prefix}.applies must be boolean")
         elif control.get("applies") is False:
@@ -261,8 +314,8 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
 
 def validate_traceability(graph: dict[str, Any], registry: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if graph.get("schema_version") != "1.0":
-        errors.append("traceability graph schema_version must be 1.0")
+    if graph.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"traceability graph schema_version must be {SCHEMA_VERSION}")
     if graph.get("generated_from_registry_sha256") != canonical_digest(registry):
         errors.append("traceability graph is stale; regenerate it from the control registry")
     links = graph.get("links")
@@ -286,13 +339,18 @@ def validate_traceability(graph: dict[str, Any], registry: dict[str, Any]) -> li
 
 def validate_ledger(ledger: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if ledger.get("schema_version") != "1.0":
-        errors.append("evidence ledger schema_version must be 1.0")
+    errors.extend(unknown_fields(
+        ledger, {"schema_version", "runs", "audits", "claims"}, "ledger",
+    ))
+    if ledger.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"evidence ledger schema_version must be {SCHEMA_VERSION}; run the migration tool")
     runs = ledger.get("runs")
     if not isinstance(runs, list):
         return errors + ["evidence ledger runs must be an array"]
     if not isinstance(ledger.get("audits"), list):
         errors.append("evidence ledger audits must be an array")
+    if not isinstance(ledger.get("claims"), list):
+        errors.append("evidence ledger claims must be an array")
     previous = "GENESIS"
     seen: set[str] = set()
     for index, run in enumerate(runs):

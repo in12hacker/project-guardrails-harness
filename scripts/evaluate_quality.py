@@ -38,6 +38,16 @@ from quality_common import (
 
 OUTPUT_LIMIT_BYTES = 64 * 1024
 BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+")
+TRUNCATION_MARKER_TEMPLATE = (
+    "\n--- OUTPUT TRUNCATED; OMITTED_BYTES={omitted:020d}; TAIL_FOLLOWS ---\n"
+)
+REDACTION_TRUNCATION_MARKER_TEMPLATE = (
+    "\n--- OUTPUT TRUNCATED; RAW_OMITTED_BYTES={raw_omitted:020d}; "
+    "REDACTION_OMITTED_BYTES={omitted:020d}; TAIL_FOLLOWS ---\n"
+)
+RAW_TRUNCATION_PATTERN = re.compile(
+    r"OUTPUT TRUNCATED; OMITTED_BYTES=(\d{20}); TAIL_FOLLOWS"
+)
 
 
 def digest_file(path: Path) -> tuple[str, int]:
@@ -89,9 +99,46 @@ def persist_output(root: Path, evidence_dir: Path, text: str) -> tuple[str, str,
 
 
 def bounded_output(path: Path) -> tuple[bytes, bool]:
+    """Keep a bounded diagnostic head and tail while the raw digest covers all bytes."""
+    raw_size = path.stat().st_size
+    if raw_size <= OUTPUT_LIMIT_BYTES:
+        return path.read_bytes(), False
+
+    marker_budget = len(TRUNCATION_MARKER_TEMPLATE.format(omitted=0).encode("utf-8"))
+    payload_budget = OUTPUT_LIMIT_BYTES - marker_budget
+    head_bytes = payload_budget // 2
+    tail_bytes = payload_budget - head_bytes
+    omitted_bytes = raw_size - head_bytes - tail_bytes
+    marker = TRUNCATION_MARKER_TEMPLATE.format(omitted=omitted_bytes).encode("utf-8")
+
     with path.open("rb") as stream:
-        payload = stream.read(OUTPUT_LIMIT_BYTES + 1)
-    return payload[:OUTPUT_LIMIT_BYTES], len(payload) > OUTPUT_LIMIT_BYTES
+        head = stream.read(head_bytes)
+        stream.seek(-tail_bytes, os.SEEK_END)
+        tail = stream.read(tail_bytes)
+    return head + marker + tail, True
+
+
+def bounded_redacted_output(text: str) -> tuple[str, bool]:
+    """Re-apply the byte limit after credential replacement may expand output."""
+    payload = text.encode("utf-8")
+    if len(payload) <= OUTPUT_LIMIT_BYTES:
+        return text, False
+
+    raw_match = RAW_TRUNCATION_PATTERN.search(text)
+    raw_omitted = int(raw_match.group(1)) if raw_match else 0
+    marker_budget = len(REDACTION_TRUNCATION_MARKER_TEMPLATE.format(
+        raw_omitted=raw_omitted, omitted=0,
+    ).encode("utf-8"))
+    payload_budget = OUTPUT_LIMIT_BYTES - marker_budget
+    head_bytes = payload_budget // 2
+    tail_bytes = payload_budget - head_bytes
+    omitted_bytes = len(payload) - head_bytes - tail_bytes
+    marker = REDACTION_TRUNCATION_MARKER_TEMPLATE.format(
+        raw_omitted=raw_omitted, omitted=omitted_bytes,
+    )
+    head = payload[:head_bytes].decode("utf-8", errors="ignore")
+    tail = payload[-tail_bytes:].decode("utf-8", errors="ignore")
+    return head + marker + tail, True
 
 
 def persist_evidence_file(
@@ -338,8 +385,11 @@ def execute_control(
             output.flush()
             raw_output_sha256, raw_output_bytes = digest_file(Path(output.name))
             raw_output, output_truncated = bounded_output(Path(output.name))
+        redacted_output, redaction_truncated = bounded_redacted_output(
+            redact_output(raw_output),
+        )
         output_ref, output_digest, output_bytes = persist_output(
-            root, evidence_dir, redact_output(raw_output),
+            root, evidence_dir, redacted_output,
         )
         artifacts, missing_artifacts = artifact_evidence(root, execution)
         passed = exit_code == 0 and not timed_out and not missing_artifacts
@@ -366,7 +416,7 @@ def execute_control(
             "output_ref": output_ref,
             "raw_output_sha256": raw_output_sha256,
             "raw_output_bytes": raw_output_bytes,
-            "output_truncated": output_truncated,
+            "output_truncated": output_truncated or redaction_truncated,
             "artifacts": artifacts,
         })
         if debt_observation is not None:

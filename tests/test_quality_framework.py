@@ -720,7 +720,12 @@ class QualityFrameworkTest(unittest.TestCase):
         control = registry["controls"][0]
         control["execution"] = {
             "type": "command",
-            "command": [sys.executable, "-c", "print('x' * 70000, end='')"],
+            "command": [
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('HEAD-' + 'Bearer x ' * 1000 + "
+                "'h' * 40995 + "
+                "'omitted-middle-' + 'm' * 49985 + 't' * 49995 + '-TAIL')",
+            ],
             "cwd": ".", "timeout_seconds": 10, "authorization_required": False,
         }
         registry_path.write_text(json.dumps(registry, indent=2) + "\n")
@@ -739,11 +744,57 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         result = ledger["runs"][-1]["results"][0]
         self.assertTrue(result["output_truncated"])
-        self.assertEqual(70000, result["raw_output_bytes"])
+        self.assertEqual(150000, result["raw_output_bytes"])
         self.assertEqual(65536, result["output_bytes"])
-        self.assertEqual(
-            hashlib.sha256(b"x" * 70000).hexdigest(), result["raw_output_sha256"],
+        raw = (
+            b"HEAD-" + b"Bearer x " * 1000 + b"h" * 40995
+            + b"omitted-middle-" + b"m" * 49985
+            + b"t" * 49995 + b"-TAIL"
         )
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), result["raw_output_sha256"])
+        persisted = (project / result["output_ref"]).read_text()
+        self.assertTrue(persisted.startswith("HEAD-"))
+        self.assertTrue(persisted.endswith("-TAIL"))
+        self.assertIn("RAW_OMITTED_BYTES=", persisted)
+        self.assertIn("REDACTION_OMITTED_BYTES=", persisted)
+        self.assertNotIn("Bearer x", persisted)
+        self.assertNotIn("omitted-middle-", persisted)
+
+    def test_redaction_expansion_remains_within_output_limit(self) -> None:
+        project = self.make_project()
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        control = registry["controls"][0]
+        control["execution"] = {
+            "type": "command",
+            "command": [
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('BEGIN-' + 'Bearer x ' * 7279 + 'END')",
+            ],
+            "cwd": ".", "timeout_seconds": 10, "authorization_required": False,
+        }
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(sync.returncode, 0, sync.stderr)
+        run = self.run_evaluator(
+            project, "--run", "--audit-stage", "self",
+            "--actor", "fixture-self", "--control", control["id"],
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        ledger = json.loads(
+            (project / ".guardrails" / "evidence-ledger.json").read_text()
+        )
+        result = ledger["runs"][-1]["results"][0]
+        persisted = (project / result["output_ref"]).read_text()
+        self.assertTrue(result["output_truncated"])
+        self.assertLessEqual(result["output_bytes"], 65536)
+        self.assertIn("RAW_OMITTED_BYTES=00000000000000000000", persisted)
+        self.assertIn("REDACTION_OMITTED_BYTES=", persisted)
+        self.assertNotIn("Bearer x", persisted)
+        self.assertTrue(persisted.endswith("END"))
 
     def test_changed_artifact_stales_claim_without_corrupting_history(self) -> None:
         project = self.make_project({".gitignore": "build/\n"})
@@ -814,6 +865,25 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual("FF-01", scan["fitness_registry"][0]["id"])
         self.assertEqual(2, len(scan["package_scripts"]))
         self.assertEqual("make gate", scan["ci_commands"][0]["value"])
+
+    def test_scanner_excludes_generated_guardrails_from_project_samples(self) -> None:
+        project = Path(tempfile.mkdtemp(prefix="quality-scan-self-test-"))
+        (project / "src").mkdir()
+        (project / "src" / "lib.py").write_text("VALUE = 1\n", encoding="utf-8")
+        guardrails = project / ".guardrails"
+        guardrails.mkdir()
+        (guardrails / "INDEX.md").write_text("# Generated index\n", encoding="utf-8")
+        (guardrails / "generated.py").write_text("raise RuntimeError('generated')\n", encoding="utf-8")
+        output = project / "scan.json"
+        result = subprocess.run(
+            [sys.executable, str(SCAN), "--root", str(project), "--out", str(output)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        scan = json.loads(output.read_text())
+        self.assertEqual(1, scan["languages"]["python"])
+        self.assertNotIn(".guardrails/INDEX.md", scan["module_index_samples"])
+        self.assertIn(".guardrails/INDEX.md", scan["evidence"]["guardrails"])
 
     def test_scanner_keeps_release_and_hygiene_evidence_out_of_security(self) -> None:
         project = self.make_project({

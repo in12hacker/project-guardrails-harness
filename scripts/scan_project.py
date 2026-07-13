@@ -28,6 +28,7 @@ except ModuleNotFoundError:
 
 IGNORE_DIRS = {
     ".git",
+    ".guardrails",
     "target",
     "node_modules",
     "dist",

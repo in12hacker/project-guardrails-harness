@@ -13,7 +13,6 @@ INIT = ROOT / "scripts" / "init_quality_framework.py"
 EVALUATE = ROOT / "scripts" / "evaluate_quality.py"
 SCAN = ROOT / "scripts" / "scan_project.py"
 SYNC = ROOT / "scripts" / "sync_traceability.py"
-MIGRATE = ROOT / "scripts" / "migrate_quality_framework.py"
 
 
 class QualityFrameworkTest(unittest.TestCase):
@@ -80,56 +79,6 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertIn("claim_policies", manifest)
         self.assertIn("development_policy", manifest)
 
-    def test_v1_framework_migrates_without_reusing_prior_claim_evidence(self) -> None:
-        project = self.make_project()
-        guardrails = project / ".guardrails"
-        manifest_path = guardrails / "quality-manifest.yaml"
-        registry_path = guardrails / "control-registry.yaml"
-        ledger_path = guardrails / "evidence-ledger.json"
-        graph_path = guardrails / "traceability-graph.json"
-
-        manifest = json.loads(manifest_path.read_text())
-        manifest["schema_version"] = "1.0"
-        manifest.pop("development_policy")
-        manifest.pop("claim_policies")
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-
-        registry = json.loads(registry_path.read_text())
-        registry["schema_version"] = "1.0"
-        for field in (
-            "capabilities", "baselines", "cleanup_debts",
-            "design_scope_exemptions", "federated_rule_mappings",
-        ):
-            registry.pop(field)
-        for control in registry["controls"]:
-            control.pop("control_revision")
-            control.pop("rule_refs")
-            control.pop("evaluation_mode")
-            control.pop("required_capability_refs")
-        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
-
-        ledger = json.loads(ledger_path.read_text())
-        ledger["schema_version"] = "1.0"
-        ledger.pop("claims")
-        ledger_path.write_text(json.dumps(ledger, indent=2) + "\n")
-        graph = json.loads(graph_path.read_text())
-        graph["schema_version"] = "1.0"
-        graph_path.write_text(json.dumps(graph, indent=2) + "\n")
-
-        migrated = subprocess.run(
-            [sys.executable, str(MIGRATE), "--root", str(project)],
-            check=False, capture_output=True, text=True,
-        )
-        self.assertEqual(migrated.returncode, 0, migrated.stderr)
-        self.assertIn("schema 1.0 -> 2.0", migrated.stdout)
-        self.assertEqual("2.0", json.loads(manifest_path.read_text())["schema_version"])
-        migrated_registry = json.loads(registry_path.read_text())
-        self.assertEqual("absolute", migrated_registry["controls"][0]["evaluation_mode"])
-        self.assertEqual([], json.loads(ledger_path.read_text())["claims"])
-        claim = self.run_evaluator(project, "--claim")
-        self.assertEqual(claim.returncode, 1)
-        self.assertIn("controls without current PASS", claim.stderr)
-
     def test_unknown_claim_critical_manifest_field_is_rejected(self) -> None:
         project = self.make_project()
         manifest_path = project / ".guardrails" / "quality-manifest.yaml"
@@ -139,6 +88,96 @@ class QualityFrameworkTest(unittest.TestCase):
         result = self.run_evaluator(project, "--claim")
         self.assertEqual(result.returncode, 2)
         self.assertIn("manifest.silent_claim_override is not allowed", result.stderr)
+
+    def test_missing_declared_capability_blocks_before_product_command(self) -> None:
+        project = self.make_project()
+        marker = project / "product-command-ran"
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        registry["capabilities"].append({
+            "id": "docker",
+            "owner": "platform",
+            "authorization_required": False,
+            "preflight": {
+                "command": [sys.executable, "-c", "raise SystemExit(9)"],
+                "cwd": ".",
+                "timeout_seconds": 10,
+            },
+        })
+        control = registry["controls"][0]
+        control["required_capability_refs"] = ["docker"]
+        control["execution"] = {
+            "type": "command",
+            "command": [
+                sys.executable, "-c",
+                "from pathlib import Path; Path('product-command-ran').write_text('yes')",
+            ],
+            "cwd": ".",
+            "timeout_seconds": 10,
+            "authorization_required": False,
+        }
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+        result = self.run_evaluator(
+            project, "--run", "--audit-stage", "self", "--actor", "fixture-self",
+            "--control", control["id"],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(marker.exists())
+        ledger = json.loads(
+            (project / ".guardrails" / "evidence-ledger.json").read_text()
+        )
+        observation = ledger["runs"][-1]["results"][0]
+        self.assertEqual("BLOCKED", observation["status"])
+        self.assertEqual("environment", observation["blocker_kind"])
+        self.assertEqual("UNAVAILABLE", observation["environment"]["preflight"][0]["status"])
+
+    def test_command_output_is_redacted_and_persisted_for_cross_audit(self) -> None:
+        project = self.make_project()
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        control = registry["controls"][0]
+        control["execution"] = {
+            "type": "command",
+            "command": [
+                sys.executable, "-c",
+                "print('Authorization: Bearer top-secret-token')",
+            ],
+            "cwd": ".",
+            "timeout_seconds": 10,
+            "authorization_required": False,
+        }
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+        result = self.run_evaluator(project, "--run", "--control", control["id"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ledger = json.loads(
+            (project / ".guardrails" / "evidence-ledger.json").read_text()
+        )
+        observation = ledger["runs"][-1]["results"][0]
+        output_path = project / observation["output_ref"]
+        self.assertTrue(output_path.is_file())
+        persisted = output_path.read_text()
+        self.assertNotIn("top-secret-token", persisted)
+        self.assertIn("Bearer [REDACTED]", persisted)
+        for stage in ("cross", "release_authority"):
+            audited = self.run_evaluator(
+                project, "--run", "--audit-stage", stage,
+                "--actor", f"fixture-{stage}", "--control", control["id"],
+            )
+            self.assertEqual(audited.returncode, 0, audited.stderr)
+        task = self.run_evaluator(
+            project, "--claim", "--claim-scope", "task", "--control", control["id"],
+        )
+        self.assertEqual(task.returncode, 0, task.stderr)
 
     def test_subset_run_cannot_satisfy_full_claim(self) -> None:
         project = self.make_project()

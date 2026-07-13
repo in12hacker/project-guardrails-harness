@@ -40,7 +40,6 @@ Use it when asked to:
     ├── scan_project.py      # collect repo evidence → JSON
     ├── render_guardrails.py # render human guidance
     ├── init_quality_framework.py # create/migrate .guardrails
-    ├── migrate_quality_framework.py # explicit v1 -> v2 semantic migration
     ├── sync_traceability.py # regenerate the derived traceability graph
     └── evaluate_quality.py  # execute controls and enforce claims
 ```

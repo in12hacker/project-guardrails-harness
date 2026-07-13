@@ -114,7 +114,7 @@ def git_workspace_digest(root: Path, ignored: set[str] | None = None) -> str:
     paths = sorted({item.decode("utf-8", errors="surrogateescape") for item in result.stdout.split(b"\0") if item})
     for relative in paths:
         normalized = Path(relative).as_posix()
-        if normalized in ignored:
+        if any(normalized == item or normalized.startswith(f"{item}/") for item in ignored):
             continue
         path = root / relative
         digest.update(normalized.encode("utf-8", errors="surrogateescape"))
@@ -158,7 +158,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         "manifest",
     ))
     if manifest.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"quality manifest schema_version must be {SCHEMA_VERSION}; run the migration tool")
+        errors.append(f"quality manifest schema_version must be {SCHEMA_VERSION}; regenerate the v2 control plane")
     project = manifest.get("project")
     profile = manifest.get("profile")
     scope = manifest.get("scope")
@@ -242,7 +242,7 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
         "registry",
     ))
     if registry.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"control registry schema_version must be {SCHEMA_VERSION}; run the migration tool")
+        errors.append(f"control registry schema_version must be {SCHEMA_VERSION}; regenerate the v2 control plane")
     for collection in (
         "capabilities", "baselines", "cleanup_debts",
         "design_scope_exemptions", "federated_rule_mappings",
@@ -252,6 +252,33 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
     controls = registry.get("controls")
     if not isinstance(controls, list) or not controls:
         return errors + ["control registry must contain at least one control"]
+    capability_ids: set[str] = set()
+    for index, capability in enumerate(registry.get("capabilities", [])):
+        prefix = f"capabilities[{index}]"
+        if not isinstance(capability, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        capability_id = capability.get("id")
+        if not isinstance(capability_id, str) or not capability_id:
+            errors.append(f"{prefix}.id is required")
+        elif capability_id in capability_ids:
+            errors.append(f"duplicate capability id: {capability_id}")
+        else:
+            capability_ids.add(capability_id)
+        if not isinstance(capability.get("owner"), str) or not capability.get("owner"):
+            errors.append(f"{prefix}.owner is required")
+        preflight = capability.get("preflight")
+        if not isinstance(preflight, dict):
+            errors.append(f"{prefix}.preflight must be an object")
+        else:
+            command = preflight.get("command")
+            if not isinstance(command, list) or not command or not all(
+                isinstance(part, str) and part for part in command
+            ):
+                errors.append(f"{prefix}.preflight.command must be a non-empty argv list")
+        if not isinstance(capability.get("authorization_required"), bool):
+            errors.append(f"{prefix}.authorization_required must be boolean")
+
     seen: set[str] = set()
     for index, control in enumerate(controls):
         prefix = f"controls[{index}]"
@@ -282,6 +309,16 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.evaluation_mode is invalid")
         if not isinstance(control.get("required_capability_refs"), list):
             errors.append(f"{prefix}.required_capability_refs must be an array")
+        else:
+            unknown_capabilities = sorted(
+                str(ref) for ref in control["required_capability_refs"]
+                if not isinstance(ref, str) or ref not in capability_ids
+            )
+            if unknown_capabilities:
+                errors.append(
+                    f"{prefix}.required_capability_refs contains unknown capabilities: "
+                    f"{', '.join(str(item) for item in unknown_capabilities)}"
+                )
         if not isinstance(control.get("applies"), bool):
             errors.append(f"{prefix}.applies must be boolean")
         elif control.get("applies") is False:
@@ -343,7 +380,7 @@ def validate_ledger(ledger: dict[str, Any]) -> list[str]:
         ledger, {"schema_version", "runs", "audits", "claims"}, "ledger",
     ))
     if ledger.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"evidence ledger schema_version must be {SCHEMA_VERSION}; run the migration tool")
+        errors.append(f"evidence ledger schema_version must be {SCHEMA_VERSION}; regenerate the v2 control plane")
     runs = ledger.get("runs")
     if not isinstance(runs, list):
         return errors + ["evidence ledger runs must be an array"]

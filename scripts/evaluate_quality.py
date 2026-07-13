@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,10 @@ from quality_common import (
     validate_traceability,
     write_json_yaml,
 )
+
+
+OUTPUT_LIMIT_BYTES = 64 * 1024
+BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+")
 
 
 def digest_file(path: Path) -> tuple[str, int]:
@@ -55,7 +60,85 @@ def artifact_evidence(root: Path, execution: dict) -> tuple[list[dict], list[str
     return artifacts, missing
 
 
-def execute_control(root: Path, control: dict, authorized: set[str]) -> dict:
+def redact_output(raw: bytes) -> str:
+    """Return bounded evidence output with common credentials removed."""
+    text = raw[:OUTPUT_LIMIT_BYTES].decode("utf-8", errors="replace")
+    for name, value in os.environ.items():
+        if value and len(value) >= 4 and any(
+            marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
+        ):
+            text = text.replace(value, "[REDACTED]")
+    return BEARER_PATTERN.sub(r"\1[REDACTED]", text)
+
+
+def persist_output(root: Path, evidence_dir: Path, text: str) -> tuple[str, str, int]:
+    """Persist redacted output by digest and return its project-relative reference."""
+    payload = text.encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    path = evidence_dir / f"{digest}.log"
+    if not path.exists():
+        path.write_bytes(payload)
+    try:
+        reference = path.relative_to(root).as_posix()
+    except ValueError:
+        reference = str(path)
+    return reference, digest, len(payload)
+
+
+def capability_preflight(
+    root: Path,
+    control: dict,
+    capabilities: dict[str, dict],
+    authorized: set[str],
+) -> tuple[list[dict], str | None, str | None]:
+    """Evaluate declared environment capabilities before a product command."""
+    observations: list[dict] = []
+    for capability_id in control.get("required_capability_refs", []):
+        capability = capabilities[capability_id]
+        if capability.get("authorization_required") and not (
+            capability_id in authorized or control["id"] in authorized
+        ):
+            return observations, "authorization", f"capability {capability_id} requires authorization"
+        preflight = capability["preflight"]
+        command = preflight["command"]
+        cwd = root / preflight.get("cwd", ".")
+        timeout = int(preflight.get("timeout_seconds", 30))
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                check=False,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            observations.append({
+                "capability_id": capability_id,
+                "status": "UNAVAILABLE",
+                "detail": str(exc),
+            })
+            return observations, "environment", f"capability {capability_id} is unavailable"
+        observation = {
+            "capability_id": capability_id,
+            "status": "AVAILABLE" if completed.returncode == 0 else "UNAVAILABLE",
+            "exit_code": completed.returncode,
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+        observations.append(observation)
+        if completed.returncode != 0:
+            return observations, "environment", f"capability {capability_id} preflight failed"
+    return observations, None, None
+
+
+def execute_control(
+    root: Path,
+    control: dict,
+    authorized: set[str],
+    capabilities: dict[str, dict],
+    evidence_dir: Path,
+) -> dict:
     control_id = control["id"]
     execution = control["execution"]
     result = {
@@ -71,8 +154,24 @@ def execute_control(root: Path, control: dict, authorized: set[str]) -> dict:
         result["detail"] = "confirmed not applicable" if result["status"] == "NOT_APPLICABLE" else "N/A lacks rationale or confirmation"
         return result
 
+    preflight, blocker_kind, blocker_detail = capability_preflight(
+        root, control, capabilities, authorized,
+    )
+    result["environment"] = {
+        "requirements": control.get("required_capability_refs", []),
+        "preflight": preflight,
+    }
+    if blocker_kind:
+        result.update({
+            "status": "BLOCKED",
+            "blocker_kind": blocker_kind,
+            "detail": blocker_detail,
+        })
+        return result
+
     if execution.get("authorization_required") and control_id not in authorized:
         result["status"] = "BLOCKED"
+        result["blocker_kind"] = "authorization"
         result["detail"] = f"separate authorization required; rerun with --authorize {control_id}"
         return result
 
@@ -134,7 +233,10 @@ def execute_control(root: Path, control: dict, authorized: set[str]) -> dict:
                 process.kill()
                 exit_code = process.wait()
             output.flush()
-            output_digest, output_bytes = digest_file(Path(output.name))
+            raw_output = Path(output.name).read_bytes()
+        output_ref, output_digest, output_bytes = persist_output(
+            root, evidence_dir, redact_output(raw_output),
+        )
         artifacts, missing_artifacts = artifact_evidence(root, execution)
         passed = exit_code == 0 and not timed_out and not missing_artifacts
         result.update({
@@ -145,6 +247,7 @@ def execute_control(root: Path, control: dict, authorized: set[str]) -> dict:
             "duration_seconds": round(time.monotonic() - start, 3),
             "output_sha256": output_digest,
             "output_bytes": output_bytes,
+            "output_ref": output_ref,
             "artifacts": artifacts,
         })
         if timed_out:
@@ -152,7 +255,11 @@ def execute_control(root: Path, control: dict, authorized: set[str]) -> dict:
         elif missing_artifacts:
             result["detail"] = f"required artifacts missing: {', '.join(missing_artifacts)}"
     except OSError as exc:
-        result.update({"status": "BLOCKED", "detail": f"cannot execute command: {exc}"})
+        result.update({
+            "status": "BLOCKED",
+            "blocker_kind": "environment",
+            "detail": f"cannot execute command: {exc}",
+        })
     return result
 
 
@@ -262,7 +369,8 @@ def main() -> int:
     commit = git_commit(root)
     try:
         ledger_relative = (guardrails / "evidence-ledger.json").relative_to(root).as_posix()
-        ignored_workspace_paths = {ledger_relative}
+        evidence_relative = (guardrails / "evidence").relative_to(root).as_posix()
+        ignored_workspace_paths = {ledger_relative, evidence_relative}
     except ValueError:
         ignored_workspace_paths = set()
     workspace_sha256 = git_workspace_digest(root, ignored_workspace_paths)
@@ -337,7 +445,13 @@ def main() -> int:
         return 0
 
     authorized = set(args.authorize)
-    results = [execute_control(root, c, authorized) for c in controls]
+    capabilities = {
+        capability["id"]: capability for capability in registry.get("capabilities", [])
+    }
+    results = [
+        execute_control(root, control, authorized, capabilities, guardrails / "evidence" / "outputs")
+        for control in controls
+    ]
     final = conclusion(results)
     run = {
         "run_id": str(uuid.uuid4()),

@@ -119,7 +119,7 @@ higher maturity where the requirement applies.
 
 The generated framework must test itself:
 
-- schema validation and version migration;
+- schema validation and rejection of unsupported versions;
 - registry/runner/CI synchronization;
 - orphan and duplicate controls;
 - stale paths, commands, owners, and standard versions;

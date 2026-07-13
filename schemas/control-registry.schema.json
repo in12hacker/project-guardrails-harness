@@ -56,7 +56,29 @@
         "additionalProperties": true
       }
     },
-    "capabilities": {"type": "array"},
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "owner", "authorization_required", "preflight"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "owner": {"type": "string", "minLength": 1},
+          "authorization_required": {"type": "boolean"},
+          "preflight": {
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+              "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "cwd": {"type": "string"},
+              "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "baselines": {"type": "array"},
     "cleanup_debts": {"type": "array"},
     "design_scope_exemptions": {"type": "array"},

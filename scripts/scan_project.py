@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Iterable
 
@@ -229,15 +230,35 @@ def _line_count(path: Path) -> int:
         return 0
 
 
+def git_visible_files(root: Path) -> set[str] | None:
+    """Return tracked and unignored untracked files, or None outside Git."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-co", "--exclude-standard", "-z"],
+            cwd=root, check=False, capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return {
+        item.decode("utf-8", errors="surrogateescape")
+        for item in result.stdout.split(b"\0") if item
+    }
+
+
 def collect_instruction_files(root: Path) -> list[dict]:
     """Rule/instruction docs the project ALREADY keeps. Presence + size only;
     content is the model's to read as authoritative (ingest, don't overwrite)."""
     found: list[dict] = []
     seen: set[str] = set()
+    visible = git_visible_files(root)
     for path in iter_files(root):
         if path.name not in INSTRUCTION_FILE_NAMES:
             continue
         relative = path.relative_to(root).as_posix()
+        if visible is not None and relative not in visible:
+            continue
         if relative in seen:
             continue
         found.append({"path": relative, "lines": _line_count(path)})
@@ -252,6 +273,8 @@ def collect_instruction_files(root: Path) -> list[dict]:
                     p.suffix.lower() in {".md", ".mdc"} or p.name == "SKILL.md"
                 ):
                     relp = p.relative_to(root).as_posix()
+                    if visible is not None and relp not in visible:
+                        continue
                     if relp not in seen:
                         found.append({"path": relp, "lines": _line_count(p)})
                         seen.add(relp)

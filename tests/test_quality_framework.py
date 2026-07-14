@@ -962,6 +962,23 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("active Skill revision/content/trust differs", result.stderr)
 
+    def test_scanner_excludes_gitignored_local_instruction_overrides(self) -> None:
+        project = Path(tempfile.mkdtemp(prefix="quality-scan-ignore-test-"))
+        (project / "AGENTS.md").write_text("# Shared\n", encoding="utf-8")
+        (project / "CLAUDE.local.md").write_text("# Local\n", encoding="utf-8")
+        (project / ".gitignore").write_text("CLAUDE.local.md\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+        subprocess.run(["git", "add", "AGENTS.md", ".gitignore"], cwd=project, check=True)
+        output = project / "scan.json"
+        result = subprocess.run(
+            [sys.executable, str(SCAN), "--root", str(project), "--out", str(output)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        paths = {item["path"] for item in json.loads(output.read_text())["instruction_files"]}
+        self.assertIn("AGENTS.md", paths)
+        self.assertNotIn("CLAUDE.local.md", paths)
+
 
 if __name__ == "__main__":
     unittest.main()

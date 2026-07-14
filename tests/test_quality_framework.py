@@ -127,6 +127,16 @@ class QualityFrameworkTest(unittest.TestCase):
             check=False, capture_output=True, text=True,
         )
 
+    def load_quality_common(self):
+        spec = importlib.util.spec_from_file_location(
+            "quality_common_selector_fixture", ROOT / "scripts" / "quality_common.py",
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     def test_initializer_generates_machine_sources_and_traceability(self) -> None:
         project = self.make_project()
         guardrails = project / ".guardrails"
@@ -524,6 +534,191 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         self.assertEqual(blocked.returncode, 2)
         self.assertIn("mandatory project rule is unmapped", blocked.stderr)
+
+    def test_markdown_heading_selector_ignores_fenced_headings_and_occurrences(self) -> None:
+        module = self.load_quality_common()
+        root = Path(tempfile.mkdtemp(prefix="markdown-selector-test-"))
+        source = root / "rules.md"
+        text = (
+            "# Primary\n"
+            "before\n"
+            "```text\n"
+            "# Fenced fake\n"
+            "## Repeated\n"
+            "```\n"
+            "after\n"
+            "# Following\n"
+            "following body\n"
+            "## Repeated\n"
+            "first real\n"
+            "## Repeated\n"
+            "second real\n"
+        )
+        source.write_text(text, encoding="utf-8")
+        sections = module.markdown_heading_sections(text)
+        selectors = [
+            (section["value"], section["occurrence"])
+            for section in sections
+        ]
+        self.assertEqual(
+            [
+                ("# Primary", 1), ("# Following", 1),
+                ("## Repeated", 1), ("## Repeated", 2),
+            ],
+            selectors,
+        )
+        self.assertIsNone(module.selected_source_sha256(source, {
+            "kind": "markdown_heading", "value": "# Fenced fake", "occurrence": 1,
+        }))
+        primary = text[:text.index("# Following")]
+        self.assertEqual(
+            hashlib.sha256(primary.encode()).hexdigest(),
+            module.selected_source_sha256(source, {
+                "kind": "markdown_heading", "value": "# Primary", "occurrence": 1,
+            }),
+        )
+        following = text[text.index("# Following"):]
+        self.assertEqual(
+            hashlib.sha256(following.encode()).hexdigest(),
+            module.selected_source_sha256(source, {
+                "kind": "markdown_heading", "value": "# Following", "occurrence": 1,
+            }),
+        )
+        second = "## Repeated\nsecond real\n"
+        repeated_selector = {
+            "kind": "markdown_heading", "value": "## Repeated", "occurrence": 2,
+        }
+        self.assertEqual(
+            hashlib.sha256(second.encode()).hexdigest(),
+            module.selected_source_sha256(source, repeated_selector),
+        )
+        self.assertEqual(
+            module.selected_source_sha256(source, repeated_selector),
+            module.selected_source_sha256(source, repeated_selector),
+        )
+        self.assertIsNone(module.selected_source_sha256(source, {
+            "kind": "markdown_heading", "value": "## Repeated", "occurrence": 3,
+        }))
+
+    def test_markdown_heading_selector_honors_fence_marker_and_length(self) -> None:
+        module = self.load_quality_common()
+        root = Path(tempfile.mkdtemp(prefix="markdown-fence-test-"))
+        fixtures = {
+            "tilde-long-close.md": (
+                "# Before\n~~~text\n# Tilde fake\n~~~~~\nbody\n# After\nreal\n",
+                ["# Before", "# After"],
+            ),
+            "short-close.md": (
+                "# Before\n````text\n# Fake one\n```\n# Fake two\n````\nbody\n# After\nreal\n",
+                ["# Before", "# After"],
+            ),
+            "different-marker.md": (
+                "# Before\n```text\n# Fake mixed\n~~~\n# Still fenced\n```\n# After\nreal\n",
+                ["# Before", "# After"],
+            ),
+            "unclosed.md": (
+                "# Before\n~~~text\n# Fake forever\n## Also fake\n",
+                ["# Before"],
+            ),
+        }
+        for name, (text, expected) in fixtures.items():
+            with self.subTest(name=name):
+                source = root / name
+                source.write_text(text, encoding="utf-8")
+                sections = module.markdown_heading_sections(text)
+                self.assertEqual(expected, [section["value"] for section in sections])
+                for fake in (
+                    "# Tilde fake", "# Fake one", "# Fake two", "# Fake mixed",
+                    "# Still fenced", "# Fake forever",
+                ):
+                    self.assertIsNone(module.selected_source_sha256(source, {
+                        "kind": "markdown_heading", "value": fake, "occurrence": 1,
+                    }))
+        whole = root / "whole.md"
+        whole.write_text("# Heading\nbody\n", encoding="utf-8")
+        self.assertEqual(
+            hashlib.sha256(whole.read_bytes()).hexdigest(),
+            module.selected_source_sha256(whole, {
+                "kind": "whole_file", "value": None, "occurrence": None,
+            }),
+        )
+
+    def test_evaluator_and_registry_share_fence_aware_selector_digest(self) -> None:
+        module = self.load_quality_common()
+        text = (
+            "# Real rule\n"
+            "before\n"
+            "```text\n"
+            "# Example heading\n"
+            "```\n"
+            "after\n"
+            "# Next rule\n"
+            "next\n"
+        )
+        project = self.make_project({"AGENTS.md": text})
+        source = project / "AGENTS.md"
+        selector = {
+            "kind": "markdown_heading", "value": "# Real rule", "occurrence": 1,
+        }
+        new_digest = module.selected_source_sha256(source, selector)
+        self.assertIsNotNone(new_digest)
+
+        lines = text.splitlines(keepends=True)
+        start = next(index for index, line in enumerate(lines) if line.strip() == "# Real rule")
+        old_end = next(
+            index for index in range(start + 1, len(lines))
+            if lines[index].lstrip().startswith("#")
+        )
+        old_digest = hashlib.sha256("".join(lines[start:old_end]).encode()).hexdigest()
+        self.assertNotEqual(old_digest, new_digest)
+
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        control_id = registry["controls"][0]["id"]
+        mapping = {
+            "rule_id": "PROJECT.REAL_RULE",
+            "source_ref": "AGENTS.md",
+            "source_sha256": old_digest,
+            "source_selector": selector,
+            "disposition": "federated",
+            "semantic_owner": "project-owner",
+            "control_refs": [control_id],
+            "mandatory": True,
+            "status": "current",
+            "observed_at": "2026-07-14T00:00:00+00:00",
+            "reviewed_at": "2026-07-14T00:00:00+00:00",
+        }
+        registry["federated_rule_mappings"] = [mapping]
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, sync.returncode, sync.stdout + sync.stderr)
+        stale = self.run_evaluator(
+            project, "--claim", "--claim-scope", "task", "--control", control_id,
+        )
+        self.assertEqual(1, stale.returncode)
+        self.assertIn("stale_project_rule:PROJECT.REAL_RULE", stale.stderr)
+
+        registry = json.loads(registry_path.read_text())
+        registry["federated_rule_mappings"][0]["source_sha256"] = new_digest
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, sync.returncode, sync.stdout + sync.stderr)
+        for stage in ("self", "cross"):
+            run = self.run_evaluator(
+                project, "--run", "--audit-stage", stage,
+                "--actor", f"fixture-{stage}", "--control", control_id,
+            )
+            self.assertEqual(0, run.returncode, run.stderr)
+        current = self.run_evaluator(
+            project, "--claim", "--claim-scope", "task", "--control", control_id,
+        )
+        self.assertEqual(0, current.returncode, current.stderr)
 
     def test_contract_separates_observation_status_outcome_and_claim(self) -> None:
         lifecycle = (ROOT / "references" / "05-delivery-lifecycle.md").read_text()

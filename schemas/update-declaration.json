@@ -1,9 +1,9 @@
 {
   "schema_version": "3.0",
-  "change_class": "schema",
-  "compatible": false,
+  "change_class": "control_logic",
+  "compatible": true,
   "affected_control_ids": [
     "*"
   ],
-  "summary": "Introduces separate subject and storage evidence bindings."
+  "summary": "Makes Markdown heading federation selectors fence-aware without changing the v3 schema."
 }

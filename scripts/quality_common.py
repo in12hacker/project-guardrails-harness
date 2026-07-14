@@ -36,6 +36,15 @@ FEDERATION_DISPOSITIONS = {"federated", "migrated", "compiled", "retired"}
 DEBT_STATUSES = {"open", "closed"}
 EXEMPTION_STATUSES = {"active", "expired", "revoked"}
 ARCHIVE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+MARKDOWN_FENCE_OPEN_PATTERN = re.compile(
+    r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$",
+)
+MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(
+    r"^ {0,3}(?P<marker>`+|~+)[ \t]*$",
+)
+MARKDOWN_ATX_HEADING_PATTERN = re.compile(
+    r"^ {0,3}(?P<marks>#{1,6})(?:[ \t]+.*)?$",
+)
 
 DEPENDENCY_MUTATION_PREFIXES = {
     ("npm", "install"), ("npm", "i"), ("pnpm", "install"),
@@ -144,6 +153,66 @@ def valid_archive_id(value: Any) -> bool:
     )
 
 
+def markdown_heading_sections(text: str) -> list[dict[str, Any]]:
+    """Return canonical ATX sections outside CommonMark-style code fences.
+
+    Backtick and tilde fences require at least three markers. A close must use
+    the opening character with at least the opening length; an unclosed fence
+    suppresses headings through EOF. Sections end only at the next unfenced
+    ATX heading of the same or a higher level.
+    """
+    lines = text.splitlines(keepends=True)
+    headings: list[dict[str, Any]] = []
+    occurrences: dict[str, int] = {}
+    fence_character: str | None = None
+    fence_length = 0
+
+    for index, line in enumerate(lines):
+        content = line.rstrip("\r\n")
+        if fence_character is not None:
+            closing = MARKDOWN_FENCE_CLOSE_PATTERN.fullmatch(content)
+            if closing is not None:
+                marker = closing.group("marker")
+                if marker[0] == fence_character and len(marker) >= fence_length:
+                    fence_character = None
+                    fence_length = 0
+            continue
+
+        opening = MARKDOWN_FENCE_OPEN_PATTERN.fullmatch(content)
+        if opening is not None:
+            marker = opening.group("marker")
+            info = opening.group("info")
+            if marker[0] != "`" or "`" not in info:
+                fence_character = marker[0]
+                fence_length = len(marker)
+                continue
+
+        heading = MARKDOWN_ATX_HEADING_PATTERN.fullmatch(content)
+        if heading is None:
+            continue
+        value = content.strip()
+        occurrences[value] = occurrences.get(value, 0) + 1
+        headings.append({
+            "value": value,
+            "occurrence": occurrences[value],
+            "level": len(heading.group("marks")),
+            "start_line": index + 1,
+            "_start_index": index,
+        })
+
+    for position, section in enumerate(headings):
+        end = len(lines)
+        for candidate in headings[position + 1:]:
+            if candidate["level"] <= section["level"]:
+                end = candidate["_start_index"]
+                break
+        section_text = "".join(lines[section["_start_index"]:end])
+        section["end_line"] = end
+        section["sha256"] = sha256_text(section_text)
+        del section["_start_index"]
+    return headings
+
+
 def selected_source_sha256(path: Path, selector: dict[str, Any]) -> str | None:
     """Hash a whole file or one stable Markdown heading section."""
     kind = selector.get("kind")
@@ -155,22 +224,17 @@ def selected_source_sha256(path: Path, selector: dict[str, Any]) -> str | None:
     occurrence = selector.get("occurrence", 1)
     if not isinstance(heading, str) or not heading.startswith("#"):
         return None
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    matches = [index for index, line in enumerate(lines) if line.strip() == heading]
-    if not isinstance(occurrence, int) or occurrence < 1 or occurrence > len(matches):
+    if not isinstance(occurrence, int) or occurrence < 1:
         return None
-    start = matches[occurrence - 1]
-    level = len(heading) - len(heading.lstrip("#"))
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        stripped = lines[index].lstrip()
-        if not stripped.startswith("#"):
-            continue
-        candidate_level = len(stripped) - len(stripped.lstrip("#"))
-        if candidate_level <= level and stripped[candidate_level:candidate_level + 1].isspace():
-            end = index
-            break
-    return hashlib.sha256("".join(lines[start:end]).encode("utf-8")).hexdigest()
+    sections = markdown_heading_sections(path.read_text(encoding="utf-8"))
+    match = next(
+        (
+            section for section in sections
+            if section["value"] == heading and section["occurrence"] == occurrence
+        ),
+        None,
+    )
+    return match["sha256"] if match is not None else None
 
 
 def canonical_digest(data: dict[str, Any]) -> str:

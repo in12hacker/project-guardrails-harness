@@ -21,7 +21,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Before initialization, require product type, development mode, distribution model, target market, criticality, target maturity, assessed scope, public contracts, build topology, persistent-state model, external-contribution model, and whether this is an AI system.
    - Never infer legal/regulatory applicability or target market from repository keywords.
 
-3. **Initialize the v2 framework**
+3. **Initialize the v3 framework**
    - Run the bundled initializer with explicit choices. It scans repository evidence, renders human guidance, and creates the three machine sources of truth.
    - Greenfield projects get the skeleton before feature development. Brownfield projects remain globally `not_ready` until debt is eliminated, but verified convergence tasks may complete.
 
@@ -45,7 +45,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    ```
    - Replace `--no-ai-system` with `--ai-system` when the delivered product itself contains AI behavior.
    - A repository developed entirely by AI agents is an AI development mode, not automatically an AI system. Use `ai_greenfield`/`ai_brownfield` with `--no-ai-system` when the delivered product has no inference or model behavior.
-   - This is a v2-only control plane. Regenerate experimental state rather than adding v1 readers or compatibility branches.
+   - This is a v3-only control plane. Seal an older plane with its bound Skill revision, then regenerate; do not add compatibility readers or branches.
    - For AI brownfield work, register the reviewed campaign specification before any task or phase claim:
 
    ```bash
@@ -73,7 +73,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 7. **Execute controls and record evidence**
    - Local unprivileged controls run automatically when relevant. Commands are project-owned argv arrays, not fabricated shell strings.
    - Use the evaluator; a non-zero result blocks completion claims.
-   - The evaluator serializes concurrent agents with `.guardrails/.ledger.lock`, atomically replaces the ledger, and binds every run/audit/claim to project commit, workspace, registry, and Skill content.
+   - The evaluator serializes concurrent agents with `.guardrails/.ledger.lock`. Every run/audit/claim has a `subject_binding` over the latest non-evidence commit, non-evidence project tree, manifest, registry, traceability, and Skill, plus a separate `storage_binding` over ledger/evidence chain material. Committing only ledger, evidence, or archives must not stale the audited subject.
 
    ```bash
    python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --run \
@@ -108,12 +108,29 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      --phase-id <phase> --task-id <task>
    ```
 
+   Before handing work to another role, derive the four non-mutating readiness
+   levels. A readiness report is not a claim and never writes the ledger.
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/assess_readiness.py" --root . \
+     --control <affected-id> --require-level TASK_CLAIM_READY
+   ```
+
 10. **Learn and evolve**
    - Feed incidents, escaped defects, SLO breaches, customer outcomes, vulnerability response, and repeated review findings back into project controls and durable memory.
    - Record external-project observations with immutable revision, evidence paths, profile, applicability boundary, and counterexamples.
    - Promote portable lessons only after independent corroboration or a stable formal standard, explicit target applicability, owner review, runnable verification, and false-positive tests.
    - Keep `.guardrails` project-owned and versioned. Select `environment_managed`, `project_symlink`, or `vendored` Skill deployment explicitly. For `project_symlink`, keep client-specific links uncommitted and point every client to the same reviewed checkout.
    - When the active schema changes incompatibly, seal the old control plane as a read-only digest archive, add the external signature when its profile requires one, and regenerate the active plane. Do not add compatibility readers.
+   - Review every Skill update before changing the active plane. `--check` is
+     read-only; `--apply` accepts only a declared compatible same-schema update,
+     increments an active campaign revision, preserves project-owned guidance,
+     synchronizes traceability, and reports controls that must rerun.
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/review_skill_update.py" --root . --check
+   python3 "$SKILL_DIR/scripts/review_skill_update.py" --root . --apply
+   ```
 
    ```bash
    python3 "$SKILL_DIR/scripts/seal_evidence.py" --root . --archive-id <immutable-id>
@@ -131,7 +148,7 @@ and never overrides them. Use the initializer in step 3 to scaffold the set.
 .guardrails/
 ├── quality-manifest.yaml   # selected profile, scope, maturity, audit and claim policy
 ├── control-registry.yaml   # applicable controls, owners, execution and evidence requirements
-├── evidence-ledger.json    # append-only execution/audit evidence bound to commits
+├── evidence-ledger.json    # subject-bound evidence + separate storage-chain bindings
 ├── traceability-graph.json # derived requirement → risk → control → test → evidence graph
 ├── INDEX.md          # ALWAYS loaded: one-line profile, owner summary, hard-gate shortlist, links (keep <150 lines)
 ├── profile.md        # evidence: README excerpt + deps + build targets + existing rules
@@ -168,7 +185,7 @@ Keep `INDEX.md` under ~150 lines and each file under ~300 lines; put the most sa
 - Do not record task or phase `COMPLETED` unless all affected non-debt controls
   are current `PASS` and its declared exit policy is satisfied. Never rewrite a
   failed debt control as `PASS` to complete a task.
-- Do not claim a maturity level, project completion, mergeability, or release readiness unless every applicable control and required audit stage for that claim is current `PASS` for the same commit and scope.
+- Do not claim a maturity level, project completion, mergeability, or release readiness unless every applicable control and required audit stage is current `PASS` for the same subject binding and scope. A later storage-only commit may contain that evidence without changing the subject.
 - Do not convert `FAIL`, `BLOCKED`, `TODO`, `DISPUTED`, or `STALE` into a passing claim. Known debt remains blocking for project maturity even when verified human-project feature work may continue.
 - Do not infer target market, legal obligations, regulatory applicability, or target maturity. Require explicit project selection.
 - Do not use draft standards as mandatory baselines when a stable official release exists.

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import hashlib
 import json
 import shutil
@@ -13,14 +12,26 @@ import sys
 import tempfile
 from pathlib import Path
 
+from generation_common import (
+    bounded_diagnostics,
+    canonical_tree_digest,
+    deduplicate_source_records,
+    transactional_replace_entries,
+)
 from quality_common import (
     MATURITY_LEVELS,
+    SCHEMA_VERSION,
     build_traceability_graph,
     canonical_digest,
+    exclusive_file_lock,
     file_sha256,
     framework_binding,
     load_json_yaml,
     safe_relative_path,
+    validate_ledger,
+    validate_manifest,
+    validate_registry,
+    validate_traceability,
     valid_archive_id,
     write_json_yaml,
 )
@@ -39,6 +50,10 @@ ACTIVE_PLANE_ENTRIES = (
     "rules", "cleanliness.md", "harness.md", "supply-chain.md", "memory.md",
     "decisions.md", "DEVELOPMENT-HANDOFF.md", "RULE-CONSOLIDATION-AUDIT.md",
     "preflight.py", "run-quality-gates.py",
+)
+PROJECT_OWNED_ENTRIES = (
+    "INDEX.md", "memory.md", "decisions.md", "DEVELOPMENT-HANDOFF.md",
+    "RULE-CONSOLIDATION-AUDIT.md", "rules/candidates.md",
 )
 
 
@@ -99,22 +114,70 @@ def predecessor_archive_binding(out_dir: Path, archive_id: str | None) -> dict |
     }
 
 
-def reset_active_plane(out_dir: Path) -> None:
-    for name in ACTIVE_PLANE_ENTRIES:
-        path = out_dir / name
-        if path.is_symlink() or path.is_file():
-            path.unlink()
-        elif path.is_dir():
-            shutil.rmtree(path)
+def build_control_plane_candidate(
+    candidate: Path,
+    existing: Path,
+    scan_path: Path,
+    manifest: dict,
+    registry: dict,
+    script_dir: Path,
+    gate_commands: list[list[str]],
+) -> list[str]:
+    result = subprocess.run(
+        [
+            sys.executable, str(script_dir / "render_guardrails.py"),
+            str(scan_path), "--out-dir", str(candidate),
+        ],
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return [result.stderr.strip() or result.stdout.strip() or "guardrail rendering failed"]
+    for relative in PROJECT_OWNED_ENTRIES:
+        source = existing / relative
+        destination = candidate / relative
+        if source.is_file() and not source.is_symlink():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+    existing_rules = existing / "rules"
+    if existing_rules.is_dir() and not existing_rules.is_symlink():
+        generated_rules = {"hard.md", "advisory.md", "candidates.md"}
+        for source in existing_rules.rglob("*"):
+            if source.is_symlink() or not source.is_file():
+                continue
+            relative = source.relative_to(existing_rules)
+            if relative.as_posix() in generated_rules:
+                continue
+            destination = candidate / "rules" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+    ledger = {"schema_version": SCHEMA_VERSION, "runs": [], "audits": [], "claims": []}
+    traceability = build_traceability_graph(registry)
+    write_json_yaml(candidate / "quality-manifest.yaml", manifest)
+    write_json_yaml(candidate / "control-registry.yaml", registry)
+    write_json_yaml(candidate / "evidence-ledger.json", ledger)
+    write_json_yaml(candidate / "traceability-graph.json", traceability)
+    shutil.copy2(script_dir.parent / "templates" / "preflight.py", candidate / "preflight.py")
+    if gate_commands:
+        write_gate_runner(candidate, gate_commands)
+    control_ids = {control["id"] for control in registry.get("controls", [])}
+    return (
+        validate_registry(registry)
+        + validate_manifest(manifest, control_ids)
+        + validate_traceability(traceability, registry)
+        + validate_ledger(ledger, candidate.parent)
+    )
 
 
 def federated_rule_inventory(root: Path, scan: dict) -> list[dict]:
-    observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    observed_at = deterministic_observed_at(root)
     mappings: list[dict] = []
-    for item in scan.get("instruction_files", []):
-        relative = item.get("path")
-        if not isinstance(relative, str):
-            continue
+    records = [
+        {**item, "source_ref": item.get("path")}
+        for item in scan.get("instruction_files", [])
+        if isinstance(item, dict)
+    ]
+    for item in deduplicate_source_records(records):
+        relative = item["source_ref"]
         path = root / relative
         if not path.is_file():
             continue
@@ -134,6 +197,18 @@ def federated_rule_inventory(root: Path, scan: dict) -> list[dict]:
             "reviewed_at": None,
         })
     return mappings
+
+
+def deterministic_observed_at(root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%cI"], cwd=root,
+            check=False, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "1970-01-01T00:00:00+00:00"
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else "1970-01-01T00:00:00+00:00"
 
 
 def recommended_gate_commands(scan: dict) -> list[list[str]]:
@@ -175,9 +250,8 @@ def recommended_gate_commands(scan: dict) -> list[list[str]]:
     return unique
 
 
-def scaffold_engineering(root: Path, out_dir: Path, commands: list[list[str]]) -> str | None:
+def write_gate_runner(out_dir: Path, commands: list[list[str]]) -> str | None:
     if not commands:
-        print("no evidence-backed commands found; engineering scaffold remains TODO")
         return None
     runner = out_dir / "run-quality-gates.py"
     source = f'''#!/usr/bin/env python3
@@ -197,6 +271,11 @@ raise SystemExit(0)
 '''
     runner.write_text(source, encoding="utf-8")
     runner.chmod(0o755)
+    return runner.relative_to(out_dir).as_posix()
+
+
+def ensure_quality_workflow(root: Path, out_dir: Path, runner_name: str) -> None:
+    runner = out_dir / runner_name
 
     workflow = root / ".github" / "workflows" / "quality-framework.yml"
     if not workflow.exists():
@@ -214,7 +293,6 @@ raise SystemExit(0)
         )
     else:
         print(f"kept existing CI workflow; wire {runner} into project CI manually")
-    return runner.relative_to(root).as_posix()
 
 
 def control(
@@ -709,8 +787,6 @@ def main() -> int:
     except ValueError as exc:
         print(f"invalid predecessor archive: {exc}", file=sys.stderr)
         return 2
-    if predecessor_archive is not None and args.force:
-        reset_active_plane(out_dir)
 
     script_dir = Path(__file__).resolve().parent
     if args.scan:
@@ -727,31 +803,26 @@ def main() -> int:
             return result.returncode
     scan = json.loads(scan_path.read_text(encoding="utf-8"))
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    render = subprocess.run(
-        [sys.executable, str(script_dir / "render_guardrails.py"), str(scan_path), "--out-dir", str(out_dir)],
-        check=False,
-    )
-    if render.returncode != 0:
-        return render.returncode
-
     args.scaffold_runner = None
+    gate_commands: list[list[str]] = []
     if args.scaffold_engineering:
         try:
             out_dir.relative_to(root)
         except ValueError:
             print("engineering scaffolding requires --out-dir inside the project root", file=sys.stderr)
             return 2
-        args.scaffold_runner = scaffold_engineering(
-            root, out_dir, recommended_gate_commands(scan),
-        )
+        gate_commands = recommended_gate_commands(scan)
+        if gate_commands:
+            args.scaffold_runner = (out_dir / "run-quality-gates.py").relative_to(root).as_posix()
+        else:
+            print("no evidence-backed commands found; engineering scaffold remains TODO")
 
     required_audits = ["self", "cross", "release_authority"]
     if args.target_maturity == "regulated_ready":
         required_audits.append("third_party")
     scope_mode = args.scope_mode
     manifest = {
-        "schema_version": "2.0",
+        "schema_version": SCHEMA_VERSION,
         "framework": framework_binding(script_dir.parent),
         "project": {
             "name": args.project_name or root.name,
@@ -843,9 +914,8 @@ def main() -> int:
             "release": {"required_stages": required_audits},
         },
     }
-    write_json_yaml(out_dir / "quality-manifest.yaml", manifest)
     registry = {
-        "schema_version": "2.0",
+        "schema_version": SCHEMA_VERSION,
         "controls": starter_controls(scan, args),
         "capabilities": [],
         "baselines": [],
@@ -853,13 +923,40 @@ def main() -> int:
         "design_scope_exemptions": [],
         "federated_rule_mappings": federated_rule_inventory(root, scan),
     }
-    write_json_yaml(out_dir / "control-registry.yaml", registry)
-    write_json_yaml(
-        out_dir / "evidence-ledger.json",
-        {"schema_version": "2.0", "runs": [], "audits": [], "claims": []},
-    )
-    shutil.copyfile(script_dir.parent / "templates" / "preflight.py", out_dir / "preflight.py")
-    write_json_yaml(out_dir / "traceability-graph.json", build_traceability_graph(registry))
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{out_dir.name}.candidate-a-", dir=out_dir.parent,
+    ) as first_raw, tempfile.TemporaryDirectory(
+        prefix=f".{out_dir.name}.candidate-b-", dir=out_dir.parent,
+    ) as second_raw:
+        first = Path(first_raw)
+        second = Path(second_raw)
+        errors = build_control_plane_candidate(
+            first, out_dir, scan_path, manifest, registry, script_dir, gate_commands,
+        )
+        errors.extend(build_control_plane_candidate(
+            second, out_dir, scan_path, manifest, registry, script_dir, gate_commands,
+        ))
+        if errors:
+            print(json.dumps({
+                "status": "generation_failed",
+                "diagnostics": bounded_diagnostics(errors),
+            }, indent=2, sort_keys=True), file=sys.stderr)
+            return 2
+        first_digest = canonical_tree_digest(first)
+        second_digest = canonical_tree_digest(second)
+        if first_digest != second_digest:
+            print(json.dumps({
+                "status": "generation_failed",
+                "diagnostics": bounded_diagnostics([
+                    f"non-idempotent generation: {first_digest} != {second_digest}",
+                ]),
+            }, indent=2, sort_keys=True), file=sys.stderr)
+            return 2
+        with exclusive_file_lock(out_dir / ".ledger.lock"):
+            transactional_replace_entries(first, out_dir, ACTIVE_PLANE_ENTRIES)
+    if gate_commands:
+        ensure_quality_workflow(root, out_dir, "run-quality-gates.py")
     print(f"initialized executable quality framework in {out_dir}")
     print("next: review applicability/owners, then run evaluate_quality.py --run")
     return 0

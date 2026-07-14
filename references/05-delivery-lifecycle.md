@@ -91,7 +91,7 @@ QualityClaim:
   claim:
   scope:
   target_maturity:
-  commit:
+  subject_binding:
   artifact_digests:
   applicable_controls:
   passing_controls:
@@ -126,10 +126,26 @@ invalidates affected outcomes.
 Each registered phase and task declares `affected_control_ids`, `assessed_scope`,
 and an exit policy containing `max_new_violations`,
 `minimum_fixed_violations`, and `allow_open_cleanup_debt`. The registration
-script binds the campaign to the current Git commit, workspace digest, and
-registry digest; callers cannot supply those bindings. Task/phase claims derive scope from the
+script binds the campaign to a pre-registration baseline over source tree,
+registry, and Skill. The manifest is excluded because it stores the binding;
+callers cannot supply it. Task/phase claims derive scope from the
 registration instead of accepting an ad hoc control subset.
 
 Human brownfield feature work may use a task claim only when all affected
 controls pass in every required audit stage and measured debt does not grow.
 Project claims never accept a selected control subset.
+
+## Handoff Readiness
+
+Readiness is a non-mutating derived report, not another control status or an
+automatic claim:
+
+- `DEVELOPMENT_START_READY`: profile, control plane, Skill binding, and required
+  AI brownfield campaign context are usable for development;
+- `TASK_CLAIM_READY`: the selected task could produce its scoped claim now;
+- `MERGE_READY`: task evidence plus the applicable project PR gate could merge;
+- `RELEASE_READY`: every release-scope control and audit stage could support a
+  release claim now.
+
+Each level is `READY`, `BLOCKED`, or `NOT_EVALUATED` with control IDs, blockers,
+and supporting run IDs. A lower level never implies a higher level.

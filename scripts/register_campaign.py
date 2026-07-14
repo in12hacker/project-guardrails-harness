@@ -9,16 +9,15 @@ import sys
 from pathlib import Path
 
 from quality_common import (
-    canonical_digest,
+    campaign_baseline_binding,
     exclusive_file_lock,
     framework_binding,
-    git_commit,
-    git_workspace_digest,
     load_json_yaml,
     safe_relative_path,
     validate_campaign,
     validate_manifest,
     validate_registry,
+    validate_traceability,
     write_json_yaml,
 )
 
@@ -54,13 +53,16 @@ def locked_main(
     try:
         manifest = load_json_yaml(guardrails / "quality-manifest.yaml")
         registry = load_json_yaml(guardrails / "control-registry.yaml")
+        traceability = load_json_yaml(guardrails / "traceability-graph.json")
         specification = json.loads(Path(args.campaign).read_text(encoding="utf-8"))
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"FAIL [QF-CAMPAIGN]: {exc}", file=sys.stderr)
         return 2
-    registry_errors = validate_registry(registry)
-    if registry_errors:
-        for error in registry_errors:
+    framework_errors = validate_registry(registry) + validate_traceability(
+        traceability, registry,
+    )
+    if framework_errors:
+        for error in framework_errors:
             print(f"FAIL [QF-FRAMEWORK]: {error}", file=sys.stderr)
         return 2
     if manifest.get("project", {}).get("development_mode") != "ai_brownfield":
@@ -72,6 +74,7 @@ def locked_main(
     forbidden = {
         "baseline_commit", "baseline_registry_sha256", "baseline_workspace_sha256",
         "baseline_framework_revision", "baseline_framework_sha256",
+        "baseline_subject_binding", "baseline_binding",
     } & set(specification)
     if forbidden:
         print("FAIL [QF-CAMPAIGN]: baseline bindings are generated, not supplied", file=sys.stderr)
@@ -83,27 +86,22 @@ def locked_main(
     if current is not None and specification.get("revision", 0) <= current.get("revision", 0):
         print("FAIL [QF-CAMPAIGN]: replacement revision must increase", file=sys.stderr)
         return 2
-    commit = git_commit(root)
-    if commit == "unavailable":
-        print("BLOCKED [QF-CAMPAIGN]: a Git commit is required", file=sys.stderr)
-        return 1
-    try:
-        ledger_relative = (guardrails / "evidence-ledger.json").relative_to(root).as_posix()
-        evidence_relative = (guardrails / "evidence").relative_to(root).as_posix()
-        workspace_sha256 = git_workspace_digest(root, {ledger_relative, evidence_relative})
-    except ValueError:
-        workspace_sha256 = "unavailable"
-    if workspace_sha256 == "unavailable":
-        print("BLOCKED [QF-CAMPAIGN]: workspace evidence is required", file=sys.stderr)
-        return 1
     current_framework = framework_binding(Path(__file__).resolve().parent.parent)
+    manifest["framework"] = current_framework
+    try:
+        guardrails_relative = guardrails.relative_to(root).as_posix()
+    except ValueError:
+        print("FAIL [QF-CAMPAIGN]: guardrails directory must be inside project root", file=sys.stderr)
+        return 2
+    baseline_binding = campaign_baseline_binding(
+        root, guardrails_relative, registry, current_framework,
+    )
+    if baseline_binding["commit"] == "unavailable" or baseline_binding["tree_sha256"] == "unavailable":
+        print("BLOCKED [QF-CAMPAIGN]: subject evidence is required", file=sys.stderr)
+        return 1
     campaign = {
         **specification,
-        "baseline_commit": commit,
-        "baseline_registry_sha256": canonical_digest(registry),
-        "baseline_workspace_sha256": workspace_sha256,
-        "baseline_framework_revision": current_framework["revision"],
-        "baseline_framework_sha256": current_framework["content_sha256"],
+        "baseline_binding": baseline_binding,
     }
     control_ids = {control["id"] for control in registry["controls"]}
     errors = validate_campaign(campaign, control_ids)
@@ -113,7 +111,6 @@ def locked_main(
         for error in errors:
             print(f"FAIL [QF-CAMPAIGN]: {error}", file=sys.stderr)
         return 2
-    manifest["framework"] = current_framework
     manifest["development_policy"]["active_campaign"] = campaign
     manifest_errors = validate_manifest(manifest, control_ids)
     if manifest_errors:
@@ -123,7 +120,7 @@ def locked_main(
     write_json_yaml(guardrails / "quality-manifest.yaml", manifest)
     print(
         f"registered campaign {campaign['id']} revision {campaign['revision']} "
-        f"at {campaign['baseline_commit']}"
+        f"at {campaign['baseline_binding']['commit']}"
     )
     return 0
 

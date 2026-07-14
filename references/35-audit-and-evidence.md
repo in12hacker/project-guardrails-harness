@@ -88,7 +88,7 @@ For a target maturity:
 2. remove only human-confirmed `NOT_APPLICABLE` controls;
 3. require every remaining control to be current `PASS`;
 4. require the audit stages selected by the manifest;
-5. bind the conclusion to commit and artifact digests;
+5. bind the conclusion to the non-evidence subject and artifact digests;
 6. refuse the claim if any evidence is missing, stale, blocked, failed, or disputed.
 
 Project and release claims always use absolute evaluation. Task and phase

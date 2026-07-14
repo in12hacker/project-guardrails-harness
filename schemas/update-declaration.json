@@ -1,0 +1,9 @@
+{
+  "schema_version": "3.0",
+  "change_class": "schema",
+  "compatible": false,
+  "affected_control_ids": [
+    "*"
+  ],
+  "summary": "Introduces separate subject and storage evidence bindings."
+}

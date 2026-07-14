@@ -31,7 +31,14 @@ Every generated manifest records:
 - trust level;
 - signed tag, when verifiable.
 
-Every run, audit, claim, and AI brownfield campaign baseline carries the revision and content digest. A checkout update is allowed, but old active evidence cannot support a new claim. Re-register the reviewed campaign revision or regenerate the active control plane after reviewing the delta.
+Every run, audit, claim, and AI brownfield campaign baseline carries the reviewed Skill binding. Before an update, run `review_skill_update.py --check`. Compatible updates may be applied in place and report affected controls; incompatible schema or semantics require sealing with the old bound Skill and regeneration with the new one. No new evaluator reads the old active schema.
+
+The initializer generates two staged candidates, validates schema, uniqueness
+and traceability, compares canonical digests, and only then replaces the active
+file set under the ledger lock. The compatible updater also validates and
+stages its smaller mutation before replacement. Failure restores the prior set.
+Project-owned `INDEX.md`, memory, decisions, handoff, consolidation audit,
+candidate rules, and custom files are preserved.
 
 Development task claims may use a clean, bound, unsigned revision. `commercial_ready` project and release claims require `trust_level=signed_release`. A signed Git tag must verify locally and the Skill tree must be clean.
 

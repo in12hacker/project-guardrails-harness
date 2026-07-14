@@ -1,7 +1,7 @@
 # Control And Traceability Model
 
 The quality framework has one portable meta-contract, federated project truth,
-three machine-maintained project records, and derived guidance.
+four machine-maintained project records, and derived guidance.
 
 ## Contents
 
@@ -95,19 +95,30 @@ the immutable delta to produce `COMPLETED`. Project/release evaluation never use
 the ratchet exception.
 
 Current status and `last_verified` are derived from the evidence ledger for the
-requested commit, workspace, scope, registry version, maturity, and audit stage.
+requested subject tree, scope, registry version, maturity, and audit stage.
 They are never hand-maintained in the registry.
 
 ## Evidence Ledger
 
 The ledger contains separate append-only, hash-chained run, audit, and claim
-records. It records the
-repository revision, full tracked/unignored workspace digest, registry digest,
-environment, tool versions, command, exit code, timestamps, output digest,
-artifact digest, status, and audit stage. Summaries are not evidence unless
+records. Each record separates:
+
+- `subject_binding`: latest commit that changed non-evidence content, a digest
+  of the tracked/unignored non-evidence tree, manifest, registry, traceability,
+  and bound Skill digests;
+- `storage_binding`: evidence/result digest or supporting ledger chain heads.
+
+It also records environment, tool versions, command, exit code, timestamps,
+output digest, artifact digest, status, and audit stage. Summaries are not evidence unless
 they link to the underlying result. The hash chain is tamper-evident, not a
 cryptographic signature; profiles that need non-repudiation must also sign or
 store the ledger in an independently controlled system.
+
+The Git commit that stores a ledger head is derived from repository history or
+an external attestation; it is not embedded into the content it commits. A
+storage-only descendant commit leaves evidence current when the subject digest
+is unchanged. Source, manifest, registry, traceability, project-rule, or Skill
+assurance changes make affected evidence stale.
 
 Inherited evidence is provenance, not a control status. Treat it as
 provisional until a current verifier confirms matching control, scope, input,
@@ -150,6 +161,10 @@ The generated framework must test itself:
 - false-positive/false-negative fixtures for custom rules;
 - golden repositories for every supported ecosystem;
 - execution timeout, output-size, and secret-redaction behavior.
+- source-ref deduplication and permanent exclusion of generated control planes;
+- two-run canonical-digest idempotency;
+- candidate validation before a rollback-capable transactional replacement;
+- bounded, aggregated diagnostics with count and representative samples.
 
 ## Semantic Closure
 

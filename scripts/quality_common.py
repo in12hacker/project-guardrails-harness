@@ -29,7 +29,7 @@ CONTROL_STATUSES = {
 }
 
 AUDIT_STAGES = {"self", "cross", "release_authority", "third_party"}
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "3.0"
 CLAIM_SCOPES = {"task", "phase", "project", "release"}
 FEDERATION_STATUSES = {"current", "stale", "disputed", "unmapped"}
 FEDERATION_DISPOSITIONS = {"federated", "migrated", "compiled", "retired"}
@@ -293,6 +293,40 @@ def git_commit(root: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else "unavailable"
 
 
+def evidence_storage_paths(guardrails_relative: str) -> set[str]:
+    """Paths whose persistence must not change the audited project subject."""
+    prefix = guardrails_relative.rstrip("/")
+    return {
+        f"{prefix}/.ledger.lock",
+        f"{prefix}/archive",
+        f"{prefix}/evidence",
+        f"{prefix}/evidence-ledger.json",
+    }
+
+
+def git_subject_commit(root: Path, ignored: set[str]) -> str:
+    """Return the latest commit that changed non-evidence project content."""
+    pathspec = ["."]
+    for relative in sorted(ignored):
+        pathspec.extend([
+            f":(exclude){relative}",
+            f":(exclude){relative}/**",
+        ])
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%H", "--", *pathspec],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and commit else "unavailable"
+
+
 def git_workspace_digest(root: Path, ignored: set[str] | None = None) -> str:
     """Hash all tracked and unignored untracked files without following symlinks."""
     try:
@@ -322,7 +356,10 @@ def git_workspace_digest(root: Path, ignored: set[str] | None = None) -> str:
                 digest.update(b"link\0")
                 digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
             elif path.is_file():
-                digest.update(b"file\0")
+                digest.update(
+                    b"file-executable\0" if path.stat().st_mode & 0o111
+                    else b"file-regular\0"
+                )
                 with path.open("rb") as stream:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         digest.update(chunk)
@@ -332,6 +369,45 @@ def git_workspace_digest(root: Path, ignored: set[str] | None = None) -> str:
             return "unavailable"
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def project_subject_binding(
+    root: Path,
+    guardrails_relative: str,
+    manifest: dict[str, Any],
+    registry: dict[str, Any],
+    traceability: dict[str, Any],
+    framework: dict[str, Any],
+) -> dict[str, str]:
+    """Bind evidence to audited content independently from evidence persistence."""
+    ignored = evidence_storage_paths(guardrails_relative)
+    return {
+        "commit": git_subject_commit(root, ignored),
+        "tree_sha256": git_workspace_digest(root, ignored),
+        "manifest_sha256": canonical_digest(manifest),
+        "registry_sha256": canonical_digest(registry),
+        "traceability_sha256": canonical_digest(traceability),
+        "framework_revision": framework["revision"],
+        "framework_sha256": framework["content_sha256"],
+    }
+
+
+def campaign_baseline_binding(
+    root: Path,
+    guardrails_relative: str,
+    registry: dict[str, Any],
+    framework: dict[str, Any],
+) -> dict[str, str]:
+    """Bind a campaign baseline without hashing the manifest that stores it."""
+    ignored = evidence_storage_paths(guardrails_relative)
+    ignored.add(f"{guardrails_relative.rstrip('/')}/quality-manifest.yaml")
+    return {
+        "commit": git_subject_commit(root, ignored),
+        "tree_sha256": git_workspace_digest(root, ignored),
+        "registry_sha256": canonical_digest(registry),
+        "framework_revision": framework["revision"],
+        "framework_sha256": framework["content_sha256"],
+    }
 
 
 def maturity_applies(required_from: str, target: str) -> bool:
@@ -355,6 +431,67 @@ def valid_sha256(value: Any) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(
         character in "0123456789abcdef" for character in value.lower()
     )
+
+
+def validate_subject_binding(value: Any, path: str) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{path} must be an object"]
+    errors = unknown_fields(
+        value,
+        {
+            "commit", "tree_sha256", "manifest_sha256", "registry_sha256",
+            "traceability_sha256", "framework_revision", "framework_sha256",
+        },
+        path,
+    )
+    if not isinstance(value.get("commit"), str) or not value["commit"].strip():
+        errors.append(f"{path}.commit is required")
+    for field in (
+        "tree_sha256", "manifest_sha256", "registry_sha256",
+        "traceability_sha256", "framework_sha256",
+    ):
+        if not valid_sha256(value.get(field)):
+            errors.append(f"{path}.{field} must be a SHA-256 digest")
+    if not isinstance(value.get("framework_revision"), str) or not value["framework_revision"].strip():
+        errors.append(f"{path}.framework_revision is required")
+    return errors
+
+
+def validate_campaign_baseline_binding(value: Any, path: str) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{path} must be an object"]
+    errors = unknown_fields(
+        value,
+        {
+            "commit", "tree_sha256", "registry_sha256",
+            "framework_revision", "framework_sha256",
+        },
+        path,
+    )
+    if not isinstance(value.get("commit"), str) or not value["commit"].strip():
+        errors.append(f"{path}.commit is required")
+    for field in ("tree_sha256", "registry_sha256", "framework_sha256"):
+        if not valid_sha256(value.get(field)):
+            errors.append(f"{path}.{field} must be a SHA-256 digest")
+    if not isinstance(value.get("framework_revision"), str) or not value["framework_revision"].strip():
+        errors.append(f"{path}.framework_revision is required")
+    return errors
+
+
+def campaign_binding_errors(
+    campaign: dict[str, Any], registry_sha256: str, framework: dict[str, Any],
+) -> list[str]:
+    """Report drift that requires a new AI brownfield campaign revision."""
+    baseline = campaign["baseline_binding"]
+    errors: list[str] = []
+    if baseline["registry_sha256"] != registry_sha256:
+        errors.append("registry drift requires a campaign revision")
+    if (
+        baseline["framework_revision"] != framework["revision"]
+        or baseline["framework_sha256"] != framework["content_sha256"]
+    ):
+        errors.append("Skill drift requires a campaign revision")
+    return errors
 
 
 def valid_timestamp(value: Any) -> bool:
@@ -407,27 +544,20 @@ def validate_campaign(campaign: Any, control_ids: set[str] | None = None) -> lis
     errors = unknown_fields(
         campaign,
         {
-            "id", "revision", "baseline_commit", "baseline_registry_sha256",
-            "baseline_workspace_sha256", "baseline_framework_revision",
-            "baseline_framework_sha256", "target_maturity", "assessed_scope",
+            "id", "revision", "baseline_binding", "target_maturity", "assessed_scope",
             "owner", "phases",
         },
         "development_policy.active_campaign",
     )
     prefix = "development_policy.active_campaign"
-    for field in ("id", "baseline_commit", "owner"):
+    for field in ("id", "owner"):
         if not isinstance(campaign.get(field), str) or not campaign[field].strip():
             errors.append(f"{prefix}.{field} is required")
     if not isinstance(campaign.get("revision"), int) or campaign["revision"] < 1:
         errors.append(f"{prefix}.revision must be an integer >= 1")
-    if not valid_sha256(campaign.get("baseline_registry_sha256")):
-        errors.append(f"{prefix}.baseline_registry_sha256 must be a SHA-256 digest")
-    if not valid_sha256(campaign.get("baseline_workspace_sha256")):
-        errors.append(f"{prefix}.baseline_workspace_sha256 must be a SHA-256 digest")
-    if not isinstance(campaign.get("baseline_framework_revision"), str) or not campaign["baseline_framework_revision"].strip():
-        errors.append(f"{prefix}.baseline_framework_revision is required")
-    if not valid_sha256(campaign.get("baseline_framework_sha256")):
-        errors.append(f"{prefix}.baseline_framework_sha256 must be a SHA-256 digest")
+    errors.extend(validate_campaign_baseline_binding(
+        campaign.get("baseline_binding"), f"{prefix}.baseline_binding",
+    ))
     if campaign.get("target_maturity") not in MATURITY_LEVELS:
         errors.append(f"{prefix}.target_maturity is invalid")
     if not non_empty_strings(campaign.get("assessed_scope")):
@@ -518,7 +648,7 @@ def validate_manifest(
         "manifest",
     ))
     if manifest.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"quality manifest schema_version must be {SCHEMA_VERSION}; regenerate the v2 control plane")
+        errors.append(f"quality manifest schema_version must be {SCHEMA_VERSION}; seal the old plane and regenerate")
     framework = manifest.get("framework")
     project = manifest.get("project")
     profile = manifest.get("profile")
@@ -795,7 +925,7 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
         "registry",
     ))
     if registry.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"control registry schema_version must be {SCHEMA_VERSION}; regenerate the v2 control plane")
+        errors.append(f"control registry schema_version must be {SCHEMA_VERSION}; seal the old plane and regenerate")
     for collection in (
         "capabilities", "baselines", "cleanup_debts",
         "design_scope_exemptions", "federated_rule_mappings",
@@ -1246,7 +1376,7 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
         ledger, {"schema_version", "runs", "audits", "claims"}, "ledger",
     ))
     if ledger.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"evidence ledger schema_version must be {SCHEMA_VERSION}; regenerate the v2 control plane")
+        errors.append(f"evidence ledger schema_version must be {SCHEMA_VERSION}; seal the old plane and regenerate")
     runs = ledger.get("runs")
     errors.extend(_validate_hash_chain(runs, "runs"))
     errors.extend(_validate_hash_chain(ledger.get("audits"), "audits"))
@@ -1259,12 +1389,12 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             continue
         if run.get("conclusion") not in {"PASS", "FAIL", "BLOCKED", "DISPUTED"}:
             errors.append(f"{prefix}.conclusion is invalid")
-        if not isinstance(run.get("workspace_sha256"), str) or len(run["workspace_sha256"]) != 64:
-            errors.append(f"{prefix}.workspace_sha256 is invalid")
-        if not isinstance(run.get("framework_revision"), str) or not run["framework_revision"].strip():
-            errors.append(f"{prefix}.framework_revision is required")
-        if not valid_sha256(run.get("framework_sha256")):
-            errors.append(f"{prefix}.framework_sha256 is invalid")
+        errors.extend(validate_subject_binding(run.get("subject_binding"), f"{prefix}.subject_binding"))
+        storage = run.get("storage_binding")
+        if not isinstance(storage, dict) or set(storage) != {"evidence_sha256"}:
+            errors.append(f"{prefix}.storage_binding is invalid")
+        elif storage["evidence_sha256"] != canonical_digest({"results": run.get("results", [])}):
+            errors.append(f"{prefix}.storage_binding.evidence_sha256 does not match results")
         for field in ("actor", "authority_id", "execution_context"):
             if not isinstance(run.get(field), str) or not run[field].strip():
                 errors.append(f"{prefix}.{field} is required")
@@ -1358,10 +1488,7 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             errors.append(f"{prefix}.audit_stage must be an independent stage")
         if audit.get("conclusion") not in {"PASS", "FAIL", "BLOCKED", "DISPUTED"}:
             errors.append(f"{prefix}.conclusion is invalid")
-        if not isinstance(audit.get("framework_revision"), str) or not audit["framework_revision"].strip():
-            errors.append(f"{prefix}.framework_revision is required")
-        if not valid_sha256(audit.get("framework_sha256")):
-            errors.append(f"{prefix}.framework_sha256 is invalid")
+        errors.extend(validate_subject_binding(audit.get("subject_binding"), f"{prefix}.subject_binding"))
         if not non_empty_strings(audit.get("reviewed_run_ids")):
             errors.append(f"{prefix}.reviewed_run_ids must be non-empty")
         elif not set(audit["reviewed_run_ids"]) <= set(runs_by_id):
@@ -1373,10 +1500,18 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             audit.get(field) != audited_run.get(field)
             for field in (
                 "audit_stage", "authority_id", "execution_context", "conclusion",
-                "framework_revision", "framework_sha256",
+                "subject_binding",
             )
         ):
             errors.append(f"{prefix} does not match its audit run")
+        storage = audit.get("storage_binding")
+        if (
+            not isinstance(storage, dict)
+            or set(storage) != {"run_entry_sha256"}
+            or audited_run is None
+            or storage.get("run_entry_sha256") != audited_run.get("entry_sha256")
+        ):
+            errors.append(f"{prefix}.storage_binding does not match its audit run")
     for index, claim in enumerate(ledger.get("claims", [])):
         if not isinstance(claim, dict):
             continue
@@ -1385,10 +1520,7 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             errors.append(f"{prefix}.claim_scope is invalid")
         if claim.get("outcome") not in {"COMPLETED", "PASS"}:
             errors.append(f"{prefix}.outcome is invalid")
-        if not isinstance(claim.get("framework_revision"), str) or not claim["framework_revision"].strip():
-            errors.append(f"{prefix}.framework_revision is required")
-        if not valid_sha256(claim.get("framework_sha256")):
-            errors.append(f"{prefix}.framework_sha256 is invalid")
+        errors.extend(validate_subject_binding(claim.get("subject_binding"), f"{prefix}.subject_binding"))
         if not non_empty_strings(claim.get("control_ids")):
             errors.append(f"{prefix}.control_ids must be non-empty")
         supporting = claim.get("supporting_run_ids")
@@ -1397,14 +1529,26 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             continue
         for run_id in supporting:
             run = runs_by_id[run_id]
-            if any(
-                claim.get(field) != run.get(field)
-                for field in (
-                    "commit", "workspace_sha256", "registry_sha256", "target_maturity",
-                    "framework_revision", "framework_sha256",
-                )
+            if (
+                claim.get("subject_binding") != run.get("subject_binding")
+                or claim.get("target_maturity") != run.get("target_maturity")
             ):
                 errors.append(f"{prefix} has stale supporting run {run_id}")
             if run.get("audit_stage") not in claim.get("audit_stages", []):
                 errors.append(f"{prefix} includes a run from an undeclared audit stage")
+        storage = claim.get("storage_binding")
+        if not isinstance(storage, dict) or set(storage) != {
+            "runs_chain_head_sha256", "audits_chain_head_sha256",
+        }:
+            errors.append(f"{prefix}.storage_binding is invalid")
+        else:
+            run_heads = {"GENESIS", *(run.get("entry_sha256") for run in runs if isinstance(run, dict))}
+            audit_heads = {
+                "GENESIS",
+                *(audit.get("entry_sha256") for audit in ledger.get("audits", []) if isinstance(audit, dict)),
+            }
+            if storage.get("runs_chain_head_sha256") not in run_heads:
+                errors.append(f"{prefix}.storage_binding references an unknown run chain head")
+            if storage.get("audits_chain_head_sha256") not in audit_heads:
+                errors.append(f"{prefix}.storage_binding references an unknown audit chain head")
     return errors

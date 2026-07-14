@@ -22,13 +22,13 @@ from quality_common import (
     AUDIT_STAGES,
     CLAIM_SCOPES,
     MATURITY_LEVELS,
+    campaign_binding_errors,
     canonical_digest,
     exclusive_file_lock,
     framework_binding,
-    git_commit,
-    git_workspace_digest,
     load_json_yaml,
     maturity_applies,
+    project_subject_binding,
     safe_relative_path,
     selected_source_sha256,
     validate_manifest,
@@ -299,7 +299,7 @@ def load_debt_observation(
         "baseline_count", "current_count", "new_count", "fixed_count",
     }
     if not isinstance(observation, dict) or set(observation) != required:
-        return None, "ratchet observation fields do not match the v2 contract"
+        return None, "ratchet observation fields do not match the active contract"
     if observation["baseline_ref"] != baseline_ref:
         return None, "ratchet observation references a different baseline"
     if observation["baseline_revision"] != baseline["revision"]:
@@ -332,6 +332,7 @@ def load_debt_observation(
 def execute_control(
     root: Path,
     control: dict,
+    subject_commit: str,
     authorized: set[str],
     capabilities: dict[str, dict],
     baselines: dict[str, dict],
@@ -377,7 +378,6 @@ def execute_control(
     kind = execution["type"]
     if kind in {"manual", "remote", "privileged"} and not execution.get("command"):
         manual = control.get("manual_evidence")
-        current_commit = git_commit(root)
         evidence_valid = False
         if isinstance(manual, dict):
             expires_at = dt.datetime.fromisoformat(
@@ -397,7 +397,7 @@ def execute_control(
             isinstance(manual, dict)
             and manual.get("actor")
             and manual.get("authority_id")
-            and manual.get("commit") == current_commit
+            and manual.get("commit") == subject_commit
             and evidence_valid
         ):
             result.update({"status": "PASS", "manual_evidence": manual})
@@ -425,7 +425,7 @@ def execute_control(
     if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and x for x in argv):
         result.update({"status": "FAIL", "detail": "command must be a non-empty argv list"})
         return result
-    argv = [part.replace("{commit}", git_commit(root)) for part in argv]
+    argv = [part.replace("{commit}", subject_commit) for part in argv]
     cwd = project_file(root, execution.get("cwd", "."))
     timeout = int(execution.get("timeout_seconds", 3600))
     start = time.monotonic()
@@ -528,19 +528,14 @@ def conclusion(results: list[dict]) -> str:
 
 
 def stage_results(
-    runs: list[dict], stage: str, commit: str, target: str,
-    registry_sha256: str, workspace_sha256: str, framework_revision: str,
-    framework_sha256: str, required_control_ids: set[str],
+    runs: list[dict], stage: str, subject_binding: dict, target: str,
+    required_control_ids: set[str],
 ) -> tuple[dict[str, tuple[dict, dict]], set[str], set[str]]:
     matching = [
         run for run in runs
-        if run.get("commit") == commit
+        if run.get("subject_binding") == subject_binding
         and run.get("target_maturity") == target
         and run.get("audit_stage") == stage
-        and run.get("registry_sha256") == registry_sha256
-        and run.get("workspace_sha256") == workspace_sha256
-        and run.get("framework_revision") == framework_revision
-        and run.get("framework_sha256") == framework_sha256
     ]
     latest: dict[str, tuple[dict, dict]] = {}
     for run in matching:
@@ -693,8 +688,7 @@ def outcome_blockers(
 
 
 def reviewed_run_error(
-    ledger: dict, args: argparse.Namespace, commit: str, workspace_sha256: str,
-    registry_sha256: str, framework_revision: str, framework_sha256: str,
+    ledger: dict, args: argparse.Namespace, subject_binding: dict,
     selected_control_ids: set[str],
 ) -> str | None:
     if args.audit_stage == "self":
@@ -711,13 +705,7 @@ def reviewed_run_error(
             return f"reviewed run does not exist: {run_id}"
         if source.get("audit_stage") != expected_stage:
             return f"reviewed run {run_id} is not a {expected_stage} run"
-        if (
-            source.get("commit") != commit
-            or source.get("workspace_sha256") != workspace_sha256
-            or source.get("registry_sha256") != registry_sha256
-            or source.get("framework_revision") != framework_revision
-            or source.get("framework_sha256") != framework_sha256
-        ):
+        if source.get("subject_binding") != subject_binding:
             return f"reviewed run {run_id} has stale evidence bindings"
         if not selected_control_ids <= set(source.get("selected_control_ids", [])):
             return f"reviewed run {run_id} does not cover the selected controls"
@@ -850,18 +838,19 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
         )
         return 1
 
-    commit = git_commit(root)
     try:
-        ledger_relative = (guardrails / "evidence-ledger.json").relative_to(root).as_posix()
-        evidence_relative = (guardrails / "evidence").relative_to(root).as_posix()
-        ignored_workspace_paths = {ledger_relative, evidence_relative}
+        guardrails_relative = guardrails.relative_to(root).as_posix()
     except ValueError:
-        ignored_workspace_paths = set()
-    workspace_sha256 = git_workspace_digest(root, ignored_workspace_paths)
-    registry_sha256 = canonical_digest(registry)
+        print("FAIL [QF-FRAMEWORK]: guardrails directory must be inside the project root", file=sys.stderr)
+        return 2
+    subject_binding = project_subject_binding(
+        root, guardrails_relative, manifest, registry, traceability, current_framework,
+    )
+    commit = subject_binding["commit"]
+    registry_sha256 = subject_binding["registry_sha256"]
     if args.claim:
-        if commit == "unavailable" or workspace_sha256 == "unavailable":
-            print("BLOCKED [QF-CLAIM]: Git commit and workspace evidence are required", file=sys.stderr)
+        if commit == "unavailable" or subject_binding["tree_sha256"] == "unavailable":
+            print("BLOCKED [QF-CLAIM]: Git subject commit and tree evidence are required", file=sys.stderr)
             return 1
         if args.claim_scope in {"project", "release", "phase"} and args.control:
             print(f"FAIL [QF-CLAIM]: {args.claim_scope} claims cannot select a control subset", file=sys.stderr)
@@ -889,14 +878,12 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
                 print(f"BLOCKED [QF-{args.claim_scope.upper()}]: {exc}", file=sys.stderr)
                 return 1
             campaign = manifest["development_policy"]["active_campaign"]
-            if campaign["baseline_registry_sha256"] != registry_sha256:
-                print("BLOCKED [QF-CAMPAIGN]: registry drift requires a campaign revision", file=sys.stderr)
-                return 1
-            if (
-                campaign["baseline_framework_revision"] != current_framework["revision"]
-                or campaign["baseline_framework_sha256"] != current_framework["content_sha256"]
-            ):
-                print("BLOCKED [QF-CAMPAIGN]: Skill drift requires a campaign revision", file=sys.stderr)
+            campaign_errors = campaign_binding_errors(
+                campaign, registry_sha256, current_framework,
+            )
+            if campaign_errors:
+                for error in campaign_errors:
+                    print(f"BLOCKED [QF-CAMPAIGN]: {error}", file=sys.stderr)
                 return 1
             if campaign["target_maturity"] != target:
                 print("BLOCKED [QF-CAMPAIGN]: campaign target maturity does not match the claim", file=sys.stderr)
@@ -957,10 +944,7 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
             return 1
         assessments = {
             stage: stage_results(
-                ledger.get("runs", []), stage, commit, target,
-                registry_sha256, workspace_sha256,
-                current_framework["revision"], current_framework["content_sha256"],
-                applicable_ids,
+                ledger.get("runs", []), stage, subject_binding, target, applicable_ids,
             )
             for stage in sorted(required)
         }
@@ -1010,11 +994,7 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
             "claim_scope": args.claim_scope,
             "outcome": "COMPLETED" if args.claim_scope in {"task", "phase"} else "PASS",
-            "commit": commit,
-            "workspace_sha256": workspace_sha256,
-            "registry_sha256": registry_sha256,
-            "framework_revision": current_framework["revision"],
-            "framework_sha256": current_framework["content_sha256"],
+            "subject_binding": subject_binding,
             "target_maturity": target,
             "control_ids": sorted(applicable_ids),
             "audit_stages": sorted(required),
@@ -1022,6 +1002,14 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
             "stage_contexts": stage_contexts,
             "supporting_run_ids": supporting_run_ids,
             "campaign": campaign_binding,
+            "storage_binding": {
+                "runs_chain_head_sha256": (
+                    ledger["runs"][-1]["entry_sha256"] if ledger.get("runs") else "GENESIS"
+                ),
+                "audits_chain_head_sha256": (
+                    ledger["audits"][-1]["entry_sha256"] if ledger.get("audits") else "GENESIS"
+                ),
+            },
         }
         append_chained(ledger.setdefault("claims", []), claim)
         write_json_yaml(guardrails / "evidence-ledger.json", ledger)
@@ -1055,9 +1043,7 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
         return 2
     selected_control_ids = {control["id"] for control in controls}
     review_error = reviewed_run_error(
-        ledger, args, commit, workspace_sha256, registry_sha256,
-        current_framework["revision"], current_framework["content_sha256"],
-        selected_control_ids,
+        ledger, args, subject_binding, selected_control_ids,
     )
     if review_error:
         print(f"BLOCKED [QF-AUDIT]: {review_error}", file=sys.stderr)
@@ -1069,7 +1055,7 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
     baselines = {baseline["id"]: baseline for baseline in registry.get("baselines", [])}
     results = [
         execute_control(
-            root, control, authorized, capabilities, baselines,
+            root, control, commit, authorized, capabilities, baselines,
             guardrails / "evidence" / "outputs",
             evidence_limit,
         )
@@ -1092,12 +1078,8 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
     run = {
         "run_id": str(uuid.uuid4()),
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "commit": commit,
-        "workspace_sha256": workspace_sha256,
+        "subject_binding": subject_binding,
         "target_maturity": target,
-        "registry_sha256": registry_sha256,
-        "framework_revision": current_framework["revision"],
-        "framework_sha256": current_framework["content_sha256"],
         "selected_control_ids": [control["id"] for control in controls],
         "audit_stage": args.audit_stage,
         "actor": args.actor,
@@ -1111,6 +1093,9 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
         },
         "results": results,
         "conclusion": final,
+        "storage_binding": {
+            "evidence_sha256": canonical_digest({"results": results}),
+        },
     }
     append_chained(ledger.setdefault("runs", []), run)
     if args.audit_stage != "self":
@@ -1123,8 +1108,10 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
             "authority_id": args.authority_id,
             "execution_context": args.execution_context,
             "reviewed_evidence_sha256": run["reviewed_evidence_sha256"],
-            "framework_revision": current_framework["revision"],
-            "framework_sha256": current_framework["content_sha256"],
+            "subject_binding": subject_binding,
+            "storage_binding": {
+                "run_entry_sha256": run["entry_sha256"],
+            },
             "conclusion": final,
         }
         append_chained(ledger.setdefault("audits", []), audit)

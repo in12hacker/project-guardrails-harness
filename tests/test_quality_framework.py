@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -17,6 +18,8 @@ EVALUATE = ROOT / "scripts" / "evaluate_quality.py"
 SCAN = ROOT / "scripts" / "scan_project.py"
 SYNC = ROOT / "scripts" / "sync_traceability.py"
 REGISTER = ROOT / "scripts" / "register_campaign.py"
+REVIEW_UPDATE = ROOT / "scripts" / "review_skill_update.py"
+READINESS = ROOT / "scripts" / "assess_readiness.py"
 SEAL = ROOT / "scripts" / "seal_evidence.py"
 PREFLIGHT = ROOT / "templates" / "preflight.py"
 
@@ -136,8 +139,8 @@ class QualityFrameworkTest(unittest.TestCase):
         graph = json.loads((guardrails / "traceability-graph.json").read_text())
         registry = json.loads((guardrails / "control-registry.yaml").read_text())
         self.assertEqual(len(graph["links"]), len(registry["controls"]))
-        self.assertEqual("2.0", graph["schema_version"])
-        self.assertEqual("2.0", registry["schema_version"])
+        self.assertEqual("3.0", graph["schema_version"])
+        self.assertEqual("3.0", registry["schema_version"])
         manifest = json.loads((guardrails / "quality-manifest.yaml").read_text())
         self.assertIn("claim_policies", manifest)
         self.assertIn("development_policy", manifest)
@@ -161,7 +164,7 @@ class QualityFrameworkTest(unittest.TestCase):
             1073741824, manifest["evidence_policy"]["max_active_bytes"]
         )
 
-    def test_open_core_round_trips_through_v2_contract(self) -> None:
+    def test_open_core_round_trips_through_v3_contract(self) -> None:
         project = self.make_project(distribution_model="open_core")
         result = self.run_evaluator(project, "--claim")
         self.assertEqual(1, result.returncode, result.stderr)
@@ -427,6 +430,56 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual(task.returncode, 1)
         self.assertIn("require an active campaign", task.stderr)
 
+    def test_readiness_blocks_drifted_ai_brownfield_campaign(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        exit_policy = {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 0,
+            "allow_open_cleanup_debt": True,
+        }
+        registered = self.register_campaign(project, {
+            "id": "DRIFT-CAMPAIGN", "revision": 1,
+            "target_maturity": "prototype", "assessed_scope": ["."],
+            "owner": "quality",
+            "phases": [{
+                "id": "PHASE-1", "title": "Framework adoption",
+                "affected_control_ids": [control_id], "assessed_scope": ["."],
+                "exit_policy": exit_policy,
+                "tasks": [{
+                    "id": "TASK-1", "kind": "framework_adoption",
+                    "affected_control_ids": [control_id], "assessed_scope": ["."],
+                    "exit_policy": exit_policy,
+                }],
+            }],
+        })
+        self.assertEqual(0, registered.returncode, registered.stderr)
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["development_policy"]["active_campaign"]["baseline_binding"][
+            "registry_sha256"
+        ] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        result = subprocess.run(
+            [
+                sys.executable, str(READINESS), "--root", str(project),
+                "--campaign-id", "DRIFT-CAMPAIGN", "--campaign-revision", "1",
+                "--phase-id", "PHASE-1", "--task-id", "TASK-1",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        levels = json.loads(result.stdout)["levels"]
+        for level in ("DEVELOPMENT_START_READY", "TASK_CLAIM_READY", "MERGE_READY"):
+            self.assertEqual("BLOCKED", levels[level]["status"])
+            self.assertIn(
+                "registry drift requires a campaign revision",
+                levels[level]["blockers"],
+            )
+
     def test_unconfirmed_applies_false_is_a_framework_error(self) -> None:
         project = self.make_project()
         registry_path = project / ".guardrails" / "control-registry.yaml"
@@ -589,6 +642,49 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         self.assertEqual(1, len(ledger["claims"]))
         self.assertEqual(["cross", "self"], ledger["claims"][0]["audit_stages"])
+
+    def test_evidence_only_commit_preserves_subject_evidence(self) -> None:
+        project = self.make_project()
+        control_id = "QF.FRAMEWORK.MANIFEST"
+        for stage in ("self", "cross"):
+            result = self.run_evaluator(
+                project, "--run", "--audit-stage", stage,
+                "--actor", f"fixture-{stage}", "--control", control_id,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        ledger_path = project / ".guardrails" / "evidence-ledger.json"
+        before = json.loads(ledger_path.read_text())
+        subject = before["runs"][0]["subject_binding"]
+        subprocess.run(
+            ["git", "add", ".guardrails/evidence-ledger.json"],
+            cwd=project, check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-qm", "persist quality evidence"],
+            cwd=project, check=True,
+        )
+        claim = self.run_evaluator(
+            project, "--claim", "--claim-scope", "task", "--control", control_id,
+        )
+        self.assertEqual(claim.returncode, 0, claim.stderr)
+        after = json.loads(ledger_path.read_text())
+        self.assertEqual(subject, after["runs"][1]["subject_binding"])
+        self.assertRegex(subject["tree_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(
+            after["claims"][-1]["storage_binding"]["runs_chain_head_sha256"],
+            r"^[0-9a-f]{64}$",
+        )
+        (project / "README.md").write_text("# Changed subject\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=project, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "change audited subject"],
+            cwd=project, check=True,
+        )
+        stale = self.run_evaluator(
+            project, "--claim", "--claim-scope", "task", "--control", control_id,
+        )
+        self.assertEqual(1, stale.returncode)
+        self.assertIn("controls without current PASS", stale.stderr)
 
     def test_modified_output_evidence_blocks_claim(self) -> None:
         project = self.make_project()
@@ -1002,6 +1098,159 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("active Skill revision/content/trust differs", result.stderr)
 
+    def test_skill_update_check_is_read_only_and_apply_preserves_project_files(self) -> None:
+        project = self.make_project()
+        guardrails = project / ".guardrails"
+        manifest_path = guardrails / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["framework"]["content_sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        decisions = guardrails / "decisions.md"
+        decisions.write_text("# Project-owned decision\n", encoding="utf-8")
+        declaration = project.parent / f"{project.name}-compatible-update.json"
+        declaration.write_text(json.dumps({
+            "schema_version": "3.0",
+            "change_class": "presentation",
+            "compatible": True,
+            "affected_control_ids": ["*"],
+            "summary": "Fixture presentation update.",
+        }) + "\n")
+        before = {path: path.read_bytes() for path in guardrails.rglob("*") if path.is_file()}
+        checked = subprocess.run(
+            [
+                sys.executable, str(REVIEW_UPDATE), "--root", str(project),
+                "--declaration", str(declaration), "--check",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, checked.returncode, checked.stderr)
+        self.assertEqual("update_available", json.loads(checked.stdout)["status"])
+        self.assertEqual(before, {
+            path: path.read_bytes() for path in guardrails.rglob("*") if path.is_file()
+        })
+        applied = subprocess.run(
+            [
+                sys.executable, str(REVIEW_UPDATE), "--root", str(project),
+                "--declaration", str(declaration), "--apply",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, applied.returncode, applied.stderr)
+        self.assertEqual("applied", json.loads(applied.stdout)["status"])
+        self.assertEqual("# Project-owned decision\n", decisions.read_text())
+        updated = json.loads(manifest_path.read_text())
+        self.assertNotEqual("0" * 64, updated["framework"]["content_sha256"])
+
+    def test_skill_update_refuses_incompatible_schema_without_mutation(self) -> None:
+        project = self.make_project()
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schema_version"] = "2.0"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        before = manifest_path.read_bytes()
+        result = subprocess.run(
+            [sys.executable, str(REVIEW_UPDATE), "--root", str(project), "--apply"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, result.returncode)
+        report = json.loads(result.stdout)
+        self.assertEqual("schema", report["change_class"])
+        self.assertTrue(report["requires_seal"])
+        self.assertEqual(before, manifest_path.read_bytes())
+
+    def test_compatible_skill_update_increments_active_campaign_revision(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        exit_policy = {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 0,
+            "allow_open_cleanup_debt": True,
+        }
+        registered = self.register_campaign(project, {
+            "id": "UPDATE-CAMPAIGN", "revision": 1,
+            "target_maturity": "prototype", "assessed_scope": ["."],
+            "owner": "quality",
+            "phases": [{
+                "id": "PHASE-1", "title": "Framework update",
+                "affected_control_ids": [control_id], "assessed_scope": ["."],
+                "exit_policy": exit_policy,
+                "tasks": [{
+                    "id": "TASK-1", "kind": "framework_adoption",
+                    "affected_control_ids": [control_id], "assessed_scope": ["."],
+                    "exit_policy": exit_policy,
+                }],
+            }],
+        })
+        self.assertEqual(0, registered.returncode, registered.stderr)
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["framework"]["content_sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        declaration = project.parent / f"{project.name}-campaign-update.json"
+        declaration.write_text(json.dumps({
+            "schema_version": "3.0", "change_class": "control_logic",
+            "compatible": True, "affected_control_ids": [control_id],
+            "summary": "Fixture control update.",
+        }) + "\n")
+        applied = subprocess.run(
+            [
+                sys.executable, str(REVIEW_UPDATE), "--root", str(project),
+                "--declaration", str(declaration), "--apply",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, applied.returncode, applied.stderr)
+        updated = json.loads(manifest_path.read_text())
+        campaign = updated["development_policy"]["active_campaign"]
+        self.assertEqual(2, campaign["revision"])
+        self.assertEqual(
+            updated["framework"]["content_sha256"],
+            campaign["baseline_binding"]["framework_sha256"],
+        )
+
+    def test_readiness_distinguishes_handoff_merge_and_release_without_writes(self) -> None:
+        project = self.make_project()
+        control_id = "QF.FRAMEWORK.MANIFEST"
+        initial = subprocess.run(
+            [
+                sys.executable, str(READINESS), "--root", str(project),
+                "--control", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, initial.returncode, initial.stderr)
+        levels = json.loads(initial.stdout)["levels"]
+        self.assertEqual("READY", levels["DEVELOPMENT_START_READY"]["status"])
+        self.assertEqual("BLOCKED", levels["TASK_CLAIM_READY"]["status"])
+        self.assertEqual("BLOCKED", levels["MERGE_READY"]["status"])
+        self.assertEqual("BLOCKED", levels["RELEASE_READY"]["status"])
+        for stage in ("self", "cross"):
+            result = self.run_evaluator(
+                project, "--run", "--audit-stage", stage,
+                "--actor", f"fixture-{stage}", "--control", control_id,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+        guardrails = project / ".guardrails"
+        before = {path: path.read_bytes() for path in guardrails.rglob("*") if path.is_file()}
+        ready = subprocess.run(
+            [
+                sys.executable, str(READINESS), "--root", str(project),
+                "--control", control_id, "--require-level", "TASK_CLAIM_READY",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, ready.returncode, ready.stderr)
+        levels = json.loads(ready.stdout)["levels"]
+        self.assertEqual("READY", levels["TASK_CLAIM_READY"]["status"])
+        self.assertEqual("READY", levels["MERGE_READY"]["status"])
+        self.assertEqual("BLOCKED", levels["RELEASE_READY"]["status"])
+        self.assertEqual(before, {
+            path: path.read_bytes() for path in guardrails.rglob("*") if path.is_file()
+        })
+
     def test_evidence_uses_project_relative_paths(self) -> None:
         project = self.make_project()
         registry = json.loads(
@@ -1056,6 +1305,55 @@ class QualityFrameworkTest(unittest.TestCase):
         paths = {item["path"] for item in json.loads(output.read_text())["instruction_files"]}
         self.assertIn("AGENTS.md", paths)
         self.assertNotIn("CLAUDE.local.md", paths)
+
+    def test_generation_primitives_are_deduplicated_bounded_and_transactional(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "generation_common_fixture", ROOT / "scripts" / "generation_common.py",
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        records = module.deduplicate_source_records([
+            {"source_ref": "AGENTS.md"},
+            {"source_ref": "AGENTS.md"},
+            {"source_ref": ".guardrails/INDEX.md"},
+            {"source_ref": "CLAUDE.md", "generated_adapter": True},
+            {"source_ref": "docs/rules.md"},
+        ])
+        self.assertEqual(["AGENTS.md", "docs/rules.md"], [
+            record["source_ref"] for record in records
+        ])
+        diagnostics = module.bounded_diagnostics(
+            ["duplicate id"] * 100 + [f"problem-{index}" for index in range(100)],
+            max_bytes=300, max_samples=3,
+        )
+        self.assertEqual(200, diagnostics["total_count"])
+        self.assertLessEqual(len(diagnostics["samples"]), 3)
+        self.assertTrue(diagnostics["truncated"])
+
+        root = Path(tempfile.mkdtemp(prefix="generation-transaction-test-"))
+        target = root / "target"
+        candidate = root / "candidate"
+        target.mkdir()
+        candidate.mkdir()
+        for name in ("a.txt", "b.txt"):
+            (target / name).write_text(f"old-{name}\n")
+            (candidate / name).write_text(f"new-{name}\n")
+        original_replace = module.os.replace
+
+        def fail_second_install(source: str | Path, destination: str | Path) -> None:
+            if Path(source) == candidate / "b.txt" and Path(destination) == target / "b.txt":
+                raise OSError("fixture replacement failure")
+            original_replace(source, destination)
+
+        with mock.patch.object(module.os, "replace", side_effect=fail_second_install):
+            with self.assertRaises(OSError):
+                module.transactional_replace_entries(
+                    candidate, target, ("a.txt", "b.txt"),
+                )
+        self.assertEqual("old-a.txt\n", (target / "a.txt").read_text())
+        self.assertEqual("old-b.txt\n", (target / "b.txt").read_text())
 
     def test_seal_rejects_archive_id_path_escape(self) -> None:
         project = self.make_project()
@@ -1267,6 +1565,8 @@ class QualityFrameworkTest(unittest.TestCase):
 
     def test_reinitialization_binds_predecessor_and_resets_active_evidence(self) -> None:
         project = self.make_project()
+        custom_rule = project / ".guardrails" / "rules" / "project-specific.md"
+        custom_rule.write_text("# Project-specific rule\n", encoding="utf-8")
         evidence = project / ".guardrails" / "evidence"
         evidence.mkdir()
         (evidence / "stale.log").write_text("old evidence\n", encoding="utf-8")
@@ -1308,6 +1608,7 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         self.assertEqual(0, regenerated.returncode, regenerated.stderr)
         self.assertFalse(evidence.exists())
+        self.assertEqual("# Project-specific rule\n", custom_rule.read_text())
         self.assertTrue(
             (
                 project / ".guardrails" / "archive" / "revision-1"

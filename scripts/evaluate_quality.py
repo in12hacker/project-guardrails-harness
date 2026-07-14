@@ -41,6 +41,7 @@ from quality_common import (
 
 OUTPUT_LIMIT_BYTES = 64 * 1024
 BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+")
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 TRUNCATION_MARKER_TEMPLATE = (
     "\n--- OUTPUT TRUNCATED; OMITTED_BYTES={omitted:020d}; TAIL_FOLLOWS ---\n"
 )
@@ -93,6 +94,7 @@ def artifact_evidence(
 def redact_output(raw: bytes, root: Path) -> str:
     """Return bounded evidence output with credentials and checkout paths removed."""
     text = raw.decode("utf-8", errors="replace")
+    text = ANSI_ESCAPE_PATTERN.sub("", text)
     text = text.replace(str(root.resolve()), "[PROJECT_ROOT]")
     for name, value in os.environ.items():
         if value and len(value) >= 4 and any(

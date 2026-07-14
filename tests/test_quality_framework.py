@@ -318,7 +318,7 @@ class QualityFrameworkTest(unittest.TestCase):
             "type": "command",
             "command": [
                 sys.executable, "-c",
-                "print('Authorization: Bearer top-secret-token'); "
+                "print('\\x1b[31mAuthorization: Bearer top-secret-token\\x1b[0m'); "
                 f"print({str(project)!r})",
             ],
             "cwd": ".",
@@ -341,6 +341,7 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertTrue(output_path.is_file())
         persisted = output_path.read_text()
         self.assertNotIn("top-secret-token", persisted)
+        self.assertNotIn("\x1b", persisted)
         self.assertIn("Bearer [REDACTED]", persisted)
         self.assertNotIn(str(project), persisted)
         self.assertIn("[PROJECT_ROOT]", persisted)

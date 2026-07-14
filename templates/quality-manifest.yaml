@@ -1,5 +1,13 @@
 {
   "schema_version": "2.0",
+  "framework": {
+    "name": "project-guardrails-harness",
+    "revision": "REGENERATE_FROM_ACTIVE_SKILL",
+    "content_sha256": "REGENERATE_FROM_ACTIVE_SKILL",
+    "dirty": false,
+    "trust_level": "unverified",
+    "signed_tag": null
+  },
   "project": {
     "name": "REQUIRED",
     "root": ".",
@@ -50,6 +58,12 @@
       "production_mutation",
       "privileged_execution"
     ]
+  },
+  "evidence_policy": {
+    "retention": "permanent",
+    "max_bytes": 1073741824,
+    "redact_outputs": true,
+    "sealing_profile": "sigstore_bundle"
   },
   "audit_policy": {
     "required_stages": ["self", "cross", "release_authority"],

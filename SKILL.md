@@ -15,7 +15,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 
 1. **Load the quality control plane**
    - Read `.guardrails/quality-manifest.yaml`, `control-registry.yaml`, `evidence-ledger.json`, then `INDEX.md` and task-relevant files.
-   - Validate scope and evidence freshness before inheriting any prior PASS.
+   - Validate scope, the bound Skill revision/content digest, and evidence freshness before inheriting any prior PASS. A Skill update makes prior active-plane evidence stale until a reviewed campaign revision or regeneration rebinds it.
 
 2. **Require explicit profile decisions**
    - Before initialization, require product type, development mode, distribution model, target market, criticality, target maturity, assessed scope, public contracts, build topology, persistent-state model, external-contribution model, and whether this is an AI system.
@@ -26,7 +26,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Greenfield projects get the skeleton before feature development. Brownfield projects remain globally `not_ready` until debt is eliminated, but verified convergence tasks may complete.
 
    ```bash
-   SKILL_DIR="${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/project-guardrails-harness}"
+   SKILL_DIR=".agents/skills/project-guardrails-harness"
    [ -f "$SKILL_DIR/scripts/init_quality_framework.py" ] || SKILL_DIR=".claude/skills/project-guardrails-harness"
    python3 "$SKILL_DIR/scripts/init_quality_framework.py" --root . \
      --development-mode <explicit> --target-maturity <explicit> \
@@ -40,6 +40,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      --legal-profile <explicit>
    ```
    - Replace `--no-ai-system` with `--ai-system` when the delivered product itself contains AI behavior.
+   - A repository developed entirely by AI agents is an AI development mode, not automatically an AI system. Use `ai_greenfield`/`ai_brownfield` with `--no-ai-system` when the delivered product has no inference or model behavior.
    - This is a v2-only control plane. Regenerate experimental state rather than adding v1 readers or compatibility branches.
    - For AI brownfield work, register the reviewed campaign specification before any task or phase claim:
 
@@ -51,9 +52,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 4. **Ingest existing truth before adding controls**
    - Read existing instruction files, CI, build targets, test registries, fitness runners, release workflows, contracts, and operations docs.
    - Link and gap-fill; do not duplicate an existing authoritative fact.
-   - Initialization inventories detected instruction sources as mandatory
-     `unmapped` federated records. Review each source, assign its semantic owner
-     and control references, set its digest-bound status, then sync traceability;
+   - Initialization inventories every detected instruction source, including nested `SKILL.md` files, as mandatory `unmapped` federated records. Expand whole-file records into heading/rule selectors where ownership differs. Assign semantic owner, disposition, and control references, set digest-bound status, then sync traceability;
      an unmapped mandatory source blocks claims but not control execution.
 
 5. **Build end-to-end traceability**
@@ -70,6 +69,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 7. **Execute controls and record evidence**
    - Local unprivileged controls run automatically when relevant. Commands are project-owned argv arrays, not fabricated shell strings.
    - Use the evaluator; a non-zero result blocks completion claims.
+   - The evaluator serializes concurrent agents with `.guardrails/.ledger.lock`, atomically replaces the ledger, and binds every run/audit/claim to project commit, workspace, registry, and Skill content.
 
    ```bash
    python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --run \
@@ -108,6 +108,8 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Feed incidents, escaped defects, SLO breaches, customer outcomes, vulnerability response, and repeated review findings back into project controls and durable memory.
    - Record external-project observations with immutable revision, evidence paths, profile, applicability boundary, and counterexamples.
    - Promote portable lessons only after independent corroboration or a stable formal standard, explicit target applicability, owner review, runnable verification, and false-positive tests.
+   - Keep `.guardrails` project-owned and versioned. Keep only the shared Skill as local symlinks in `.agents/skills` and `.claude/skills`; do not commit the links.
+   - When the active schema changes incompatibly, seal the old ledger as a read-only signed archive and regenerate the active plane. Do not add compatibility readers.
 
 ## Output Shape
 
@@ -149,6 +151,7 @@ Keep `INDEX.md` under ~150 lines and each file under ~300 lines; put the most sa
 - Read `references/35-audit-and-evidence.md` for audit independence, evidence freshness, authorization, and claim enforcement.
 - Read `references/40-rule-lifecycle.md` for continuous rule iteration, project memory, fact maturity, ratchets, baseline cleanup semantics, module readiness, and stale-rule deletion.
 - Read `references/45-adoption-and-operations.md` for greenfield/brownfield adoption, production operation, commercial delivery, and feedback loops.
+- Read `references/50-client-deployment-and-signing.md` for Codex/Claude dual-link deployment, generated adapters, signed Skill release policy, ledger sealing, retention, and external Sigstore verification.
 
 ## Non-Negotiables
 
@@ -172,6 +175,7 @@ Keep `INDEX.md` under ~150 lines and each file under ~300 lines; put the most sa
 - Do not treat fail-open/fail-closed as a global default; require a layer matrix.
 - Do not let plaintext secrets persist outside the approved runtime boundary.
 - Do not declare release-grade supply-chain assurance without provenance and signed/verifiable artifacts.
+- Do not make a `commercial_ready` project/release claim from a moving or unsigned Skill checkout; development task claims may use an explicitly bound unverified revision.
 - Do not classify the project by keyword or language alone — read its self-description (README / AGENTS.md) and dependencies, then state the profile.
 - Do not duplicate a rule the project already states in its own files — link to it and gap-fill.
 - Do not add project-specific rules until the project profile and owner map are explicit.

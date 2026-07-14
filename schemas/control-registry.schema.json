@@ -157,11 +157,22 @@
     },
     "federatedRuleMapping": {
       "type": "object",
-      "required": ["rule_id", "source_ref", "source_sha256", "semantic_owner", "control_refs", "mandatory", "status", "observed_at", "reviewed_at"],
+      "required": ["rule_id", "source_ref", "source_sha256", "source_selector", "disposition", "semantic_owner", "control_refs", "mandatory", "status", "observed_at", "reviewed_at"],
       "properties": {
         "rule_id": {"type": "string", "minLength": 1},
         "source_ref": {"type": "string", "minLength": 1},
         "source_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+        "source_selector": {
+          "type": "object",
+          "required": ["kind", "value", "occurrence"],
+          "properties": {
+            "kind": {"enum": ["whole_file", "markdown_heading"]},
+            "value": {"type": ["string", "null"]},
+            "occurrence": {"type": ["integer", "null"], "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "disposition": {"enum": ["federated", "migrated", "compiled", "retired"]},
         "semantic_owner": {"type": "string", "minLength": 1},
         "control_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "mandatory": {"type": "boolean"},

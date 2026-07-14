@@ -10,6 +10,7 @@ from pathlib import Path
 
 from quality_common import (
     canonical_digest,
+    framework_binding,
     git_commit,
     git_workspace_digest,
     load_json_yaml,
@@ -57,6 +58,7 @@ def main() -> int:
         return 2
     forbidden = {
         "baseline_commit", "baseline_registry_sha256", "baseline_workspace_sha256",
+        "baseline_framework_revision", "baseline_framework_sha256",
     } & set(specification)
     if forbidden:
         print("FAIL [QF-CAMPAIGN]: baseline bindings are generated, not supplied", file=sys.stderr)
@@ -81,11 +83,14 @@ def main() -> int:
     if workspace_sha256 == "unavailable":
         print("BLOCKED [QF-CAMPAIGN]: workspace evidence is required", file=sys.stderr)
         return 1
+    current_framework = framework_binding(Path(__file__).resolve().parent.parent)
     campaign = {
         **specification,
         "baseline_commit": commit,
         "baseline_registry_sha256": canonical_digest(registry),
         "baseline_workspace_sha256": workspace_sha256,
+        "baseline_framework_revision": current_framework["revision"],
+        "baseline_framework_sha256": current_framework["content_sha256"],
     }
     control_ids = {control["id"] for control in registry["controls"]}
     errors = validate_campaign(campaign, control_ids)
@@ -95,6 +100,7 @@ def main() -> int:
         for error in errors:
             print(f"FAIL [QF-CAMPAIGN]: {error}", file=sys.stderr)
         return 2
+    manifest["framework"] = current_framework
     manifest["development_policy"]["active_campaign"] = campaign
     manifest_errors = validate_manifest(manifest, control_ids)
     if manifest_errors:

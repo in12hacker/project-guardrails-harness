@@ -7,12 +7,19 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from quality_common import MATURITY_LEVELS, build_traceability_graph, file_sha256, write_json_yaml
+from quality_common import (
+    MATURITY_LEVELS,
+    build_traceability_graph,
+    file_sha256,
+    framework_binding,
+    write_json_yaml,
+)
 
 
 QUALITY_DIMENSIONS = [
@@ -40,6 +47,8 @@ def federated_rule_inventory(root: Path, scan: dict) -> list[dict]:
             "rule_id": f"PROJECT.RULE_SOURCE.{stable_id}",
             "source_ref": relative,
             "source_sha256": source_digest,
+            "source_selector": {"kind": "whole_file", "value": None, "occurrence": None},
+            "disposition": "federated",
             "semantic_owner": "unassigned",
             "control_refs": [],
             "mandatory": True,
@@ -634,6 +643,7 @@ def main() -> int:
     scope_mode = args.scope_mode
     manifest = {
         "schema_version": "2.0",
+        "framework": framework_binding(script_dir.parent),
         "project": {
             "name": args.project_name or root.name,
             "root": str(root),
@@ -670,6 +680,12 @@ def main() -> int:
                 "dependency_install", "paid_service", "secrets", "remote_mutation",
                 "production_mutation", "privileged_execution",
             ],
+        },
+        "evidence_policy": {
+            "retention": "permanent",
+            "max_bytes": 1073741824,
+            "redact_outputs": True,
+            "sealing_profile": "sigstore_bundle",
         },
         "audit_policy": {
             "required_stages": required_audits,
@@ -730,6 +746,7 @@ def main() -> int:
         out_dir / "evidence-ledger.json",
         {"schema_version": "2.0", "runs": [], "audits": [], "claims": []},
     )
+    shutil.copyfile(script_dir.parent / "templates" / "preflight.py", out_dir / "preflight.py")
     write_json_yaml(out_dir / "traceability-graph.json", build_traceability_graph(registry))
     print(f"initialized executable quality framework in {out_dir}")
     print("next: review applicability/owners, then run evaluate_quality.py --run")

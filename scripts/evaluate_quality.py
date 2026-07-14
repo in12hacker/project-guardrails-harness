@@ -23,11 +23,14 @@ from quality_common import (
     CLAIM_SCOPES,
     MATURITY_LEVELS,
     canonical_digest,
+    exclusive_file_lock,
+    framework_binding,
     git_commit,
     git_workspace_digest,
     load_json_yaml,
     maturity_applies,
     safe_relative_path,
+    selected_source_sha256,
     validate_manifest,
     validate_ledger,
     validate_registry,
@@ -96,6 +99,16 @@ def persist_output(root: Path, evidence_dir: Path, text: str) -> tuple[str, str,
         path.write_bytes(payload)
     reference = path.relative_to(root).as_posix()
     return reference, digest, len(payload)
+
+
+def control_plane_bytes(guardrails: Path) -> int:
+    """Return current persistent control-plane bytes without following symlinks."""
+    total = 0
+    for path in guardrails.rglob("*"):
+        if path.name == ".ledger.lock" or path.is_symlink() or not path.is_file():
+            continue
+        total += path.stat().st_size
+    return total
 
 
 def bounded_output(path: Path) -> tuple[bytes, bool]:
@@ -451,7 +464,8 @@ def conclusion(results: list[dict]) -> str:
 
 def stage_results(
     runs: list[dict], stage: str, commit: str, target: str,
-    registry_sha256: str, workspace_sha256: str, required_control_ids: set[str],
+    registry_sha256: str, workspace_sha256: str, framework_revision: str,
+    framework_sha256: str, required_control_ids: set[str],
 ) -> tuple[dict[str, tuple[dict, dict]], set[str], set[str]]:
     matching = [
         run for run in runs
@@ -460,6 +474,8 @@ def stage_results(
         and run.get("audit_stage") == stage
         and run.get("registry_sha256") == registry_sha256
         and run.get("workspace_sha256") == workspace_sha256
+        and run.get("framework_revision") == framework_revision
+        and run.get("framework_sha256") == framework_sha256
     ]
     latest: dict[str, tuple[dict, dict]] = {}
     for run in matching:
@@ -513,9 +529,11 @@ def policy_blockers(
         if mapping.get("status") == "disputed":
             blockers.append(f"policy_conflict:{mapping.get('rule_id')}")
             continue
+        if mapping.get("disposition") == "retired":
+            continue
         try:
             source = project_file(root, mapping["source_ref"])
-            source_digest, _ = digest_file(source)
+            source_digest = selected_source_sha256(source, mapping["source_selector"])
         except (OSError, ValueError):
             source_digest = "missing"
         if mapping.get("status") == "stale" or source_digest != mapping.get("source_sha256"):
@@ -611,7 +629,8 @@ def outcome_blockers(
 
 def reviewed_run_error(
     ledger: dict, args: argparse.Namespace, commit: str, workspace_sha256: str,
-    registry_sha256: str, selected_control_ids: set[str],
+    registry_sha256: str, framework_revision: str, framework_sha256: str,
+    selected_control_ids: set[str],
 ) -> str | None:
     if args.audit_stage == "self":
         return "self audit cannot use --review-run" if args.review_run else None
@@ -631,6 +650,8 @@ def reviewed_run_error(
             source.get("commit") != commit
             or source.get("workspace_sha256") != workspace_sha256
             or source.get("registry_sha256") != registry_sha256
+            or source.get("framework_revision") != framework_revision
+            or source.get("framework_sha256") != framework_sha256
         ):
             return f"reviewed run {run_id} has stale evidence bindings"
         if not selected_control_ids <= set(source.get("selected_control_ids", [])):
@@ -687,6 +708,16 @@ def main() -> int:
         print(f"FAIL [QF-FRAMEWORK]: {exc}", file=sys.stderr)
         return 2
     try:
+        with exclusive_file_lock(guardrails / ".ledger.lock"):
+            return locked_main(args, root, guardrails)
+    except (OSError, TimeoutError) as exc:
+        print(f"BLOCKED [QF-ENVIRONMENT]: {exc}", file=sys.stderr)
+        return 1
+
+
+def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
+    """Evaluate while holding the project-local evidence ledger lock."""
+    try:
         manifest = load_json_yaml(guardrails / "quality-manifest.yaml")
         registry = load_json_yaml(guardrails / "control-registry.yaml")
         ledger = load_json_yaml(guardrails / "evidence-ledger.json")
@@ -710,6 +741,15 @@ def main() -> int:
             print(f"FAIL [QF-FRAMEWORK]: {error}", file=sys.stderr)
         return 2
 
+    current_framework = framework_binding(Path(__file__).resolve().parent.parent)
+    if manifest["framework"] != current_framework:
+        print(
+            "BLOCKED [QF-FRAMEWORK]: active Skill revision/content/trust differs from "
+            "the manifest binding; register a reviewed campaign revision or regenerate",
+            file=sys.stderr,
+        )
+        return 1
+
     target = args.target_maturity or manifest["project"]["target_maturity"]
     all_controls = [
         c for c in registry["controls"]
@@ -730,6 +770,21 @@ def main() -> int:
         print(f"{len(controls)} controls selected for {target}")
         return 0
 
+    projected_reserve = OUTPUT_LIMIT_BYTES * max(1, len(controls)) + OUTPUT_LIMIT_BYTES
+    evidence_limit = manifest["evidence_policy"]["max_bytes"]
+    try:
+        evidence_usage = control_plane_bytes(guardrails)
+    except OSError as exc:
+        print(f"BLOCKED [QF-EVIDENCE]: cannot measure evidence retention budget: {exc}", file=sys.stderr)
+        return 1
+    if evidence_usage + projected_reserve > evidence_limit:
+        print(
+            f"BLOCKED [QF-EVIDENCE]: permanent evidence budget would exceed "
+            f"{evidence_limit} bytes; seal or compact the active plane before execution",
+            file=sys.stderr,
+        )
+        return 1
+
     commit = git_commit(root)
     try:
         ledger_relative = (guardrails / "evidence-ledger.json").relative_to(root).as_posix()
@@ -746,6 +801,17 @@ def main() -> int:
         if args.claim_scope in {"project", "release", "phase"} and args.control:
             print(f"FAIL [QF-CLAIM]: {args.claim_scope} claims cannot select a control subset", file=sys.stderr)
             return 2
+        if (
+            args.claim_scope in {"project", "release"}
+            and MATURITY_LEVELS.index(target) >= MATURITY_LEVELS.index("commercial_ready")
+            and current_framework["trust_level"] != "signed_release"
+        ):
+            print(
+                "BLOCKED [QF-CLAIM]: commercial project/release claims require a "
+                "clean, cryptographically verified signed Skill tag",
+                file=sys.stderr,
+            )
+            return 1
         development_mode = manifest["project"]["development_mode"]
         campaign_binding = None
         exit_policy = None
@@ -760,6 +826,12 @@ def main() -> int:
             campaign = manifest["development_policy"]["active_campaign"]
             if campaign["baseline_registry_sha256"] != registry_sha256:
                 print("BLOCKED [QF-CAMPAIGN]: registry drift requires a campaign revision", file=sys.stderr)
+                return 1
+            if (
+                campaign["baseline_framework_revision"] != current_framework["revision"]
+                or campaign["baseline_framework_sha256"] != current_framework["content_sha256"]
+            ):
+                print("BLOCKED [QF-CAMPAIGN]: Skill drift requires a campaign revision", file=sys.stderr)
                 return 1
             if campaign["target_maturity"] != target:
                 print("BLOCKED [QF-CAMPAIGN]: campaign target maturity does not match the claim", file=sys.stderr)
@@ -821,7 +893,9 @@ def main() -> int:
         assessments = {
             stage: stage_results(
                 ledger.get("runs", []), stage, commit, target,
-                registry_sha256, workspace_sha256, applicable_ids,
+                registry_sha256, workspace_sha256,
+                current_framework["revision"], current_framework["content_sha256"],
+                applicable_ids,
             )
             for stage in sorted(required)
         }
@@ -874,6 +948,8 @@ def main() -> int:
             "commit": commit,
             "workspace_sha256": workspace_sha256,
             "registry_sha256": registry_sha256,
+            "framework_revision": current_framework["revision"],
+            "framework_sha256": current_framework["content_sha256"],
             "target_maturity": target,
             "control_ids": sorted(applicable_ids),
             "audit_stages": sorted(required),
@@ -914,7 +990,9 @@ def main() -> int:
         return 2
     selected_control_ids = {control["id"] for control in controls}
     review_error = reviewed_run_error(
-        ledger, args, commit, workspace_sha256, registry_sha256, selected_control_ids,
+        ledger, args, commit, workspace_sha256, registry_sha256,
+        current_framework["revision"], current_framework["content_sha256"],
+        selected_control_ids,
     )
     if review_error:
         print(f"BLOCKED [QF-AUDIT]: {review_error}", file=sys.stderr)
@@ -952,6 +1030,8 @@ def main() -> int:
         "workspace_sha256": workspace_sha256,
         "target_maturity": target,
         "registry_sha256": registry_sha256,
+        "framework_revision": current_framework["revision"],
+        "framework_sha256": current_framework["content_sha256"],
         "selected_control_ids": [control["id"] for control in controls],
         "audit_stage": args.audit_stage,
         "actor": args.actor,
@@ -977,6 +1057,8 @@ def main() -> int:
             "authority_id": args.authority_id,
             "execution_context": args.execution_context,
             "reviewed_evidence_sha256": run["reviewed_evidence_sha256"],
+            "framework_revision": current_framework["revision"],
+            "framework_sha256": current_framework["content_sha256"],
             "conclusion": final,
         }
         append_chained(ledger.setdefault("audits", []), audit)

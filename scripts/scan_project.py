@@ -210,11 +210,16 @@ _BOUNDARY_TEST_TOKENS = frozenset({
 # build commands, and any rules it already keeps -- so the MODEL classifies and
 # gap-fills. ("Data-backed, not guessed"; classification is the model's job.)
 
-INSTRUCTION_FILE_NAMES = (
-    "AGENTS.md", "CLAUDE.md", "GEMINI.md", "COPILOT.md", "CODEX.md",
+INSTRUCTION_FILE_NAMES = frozenset({
+    "AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "CLAUDE.local.md",
+    "GEMINI.md", "GEMINI.local.md", "COPILOT.md", "CODEX.md",
     "CONTRIBUTING.md", "llms.txt", ".cursorrules",
+    "copilot-instructions.md",
+})
+INSTRUCTION_FILE_DIRS = (
+    ".cursor/rules", ".claude/rules", ".codex/rules", ".agents",
+    ".claude/skills", ".agents/skills", ".github/instructions",
 )
-INSTRUCTION_FILE_DIRS = (".cursor/rules", ".claude/rules", ".codex/rules", ".agents")
 
 
 def _line_count(path: Path) -> int:
@@ -229,20 +234,28 @@ def collect_instruction_files(root: Path) -> list[dict]:
     content is the model's to read as authoritative (ingest, don't overwrite)."""
     found: list[dict] = []
     seen: set[str] = set()
-    for name in INSTRUCTION_FILE_NAMES:
-        if (root / name).is_file():
-            found.append({"path": name, "lines": _line_count(root / name)})
-            seen.add(name)
+    for path in iter_files(root):
+        if path.name not in INSTRUCTION_FILE_NAMES:
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative in seen:
+            continue
+        found.append({"path": relative, "lines": _line_count(path)})
+        seen.add(relative)
     for d in INSTRUCTION_FILE_DIRS:
         rdir = root / d
         if rdir.is_dir():
             for p in sorted(rdir.rglob("*")):
-                if p.is_file() and p.suffix.lower() in {".md", ".mdc"}:
+                if p.is_symlink():
+                    continue
+                if p.is_file() and (
+                    p.suffix.lower() in {".md", ".mdc"} or p.name == "SKILL.md"
+                ):
                     relp = p.relative_to(root).as_posix()
                     if relp not in seen:
                         found.append({"path": relp, "lines": _line_count(p)})
                         seen.add(relp)
-    return sorted(found, key=lambda x: x["path"])[:40]
+    return sorted(found, key=lambda x: x["path"])
 
 
 def readme_excerpt(root: Path) -> str:

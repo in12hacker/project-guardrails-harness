@@ -593,6 +593,8 @@ class QualityFrameworkTest(unittest.TestCase):
             "rule_id": "PROJECT.MANDATORY",
             "source_ref": "AGENTS.md",
             "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "source_selector": {"kind": "whole_file", "value": None, "occurrence": None},
+            "disposition": "federated",
             "semantic_owner": "project-owner",
             "control_refs": [control_id],
             "mandatory": True,
@@ -929,6 +931,36 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual(control["execution"]["type"], "remote")
         self.assertTrue(control["execution"]["authorization_required"])
         self.assertIn("{commit}", control["execution"]["command"][2])
+
+    def test_scanner_discovers_nested_skills_without_truncating_rules(self) -> None:
+        project = Path(tempfile.mkdtemp(prefix="quality-scan-rules-test-"))
+        for index in range(45):
+            path = project / f"area-{index:02d}" / "AGENTS.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(f"# Rule {index}\n", encoding="utf-8")
+        nested_skill = project / ".claude" / "skills" / "testing" / "SKILL.md"
+        nested_skill.parent.mkdir(parents=True)
+        nested_skill.write_text("---\nname: testing\ndescription: fixture\n---\n", encoding="utf-8")
+        output = project / "scan.json"
+        result = subprocess.run(
+            [sys.executable, str(SCAN), "--root", str(project), "--out", str(output)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        paths = {item["path"] for item in json.loads(output.read_text())["instruction_files"]}
+        self.assertEqual(46, len(paths))
+        self.assertIn(".claude/skills/testing/SKILL.md", paths)
+        self.assertIn("area-44/AGENTS.md", paths)
+
+    def test_manifest_framework_binding_drift_blocks_evaluation(self) -> None:
+        project = self.make_project()
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["framework"]["content_sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        result = self.run_evaluator(project, "--dry-run")
+        self.assertEqual(1, result.returncode)
+        self.assertIn("active Skill revision/content/trust differs", result.stderr)
 
 
 if __name__ == "__main__":

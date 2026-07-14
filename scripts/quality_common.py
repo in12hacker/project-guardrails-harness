@@ -8,6 +8,9 @@ import json
 import os
 import subprocess
 import datetime as dt
+import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,7 @@ AUDIT_STAGES = {"self", "cross", "release_authority", "third_party"}
 SCHEMA_VERSION = "2.0"
 CLAIM_SCOPES = {"task", "phase", "project", "release"}
 FEDERATION_STATUSES = {"current", "stale", "disputed", "unmapped"}
+FEDERATION_DISPOSITIONS = {"federated", "migrated", "compiled", "retired"}
 DEBT_STATUSES = {"open", "closed"}
 EXEMPTION_STATUSES = {"active", "expired", "revoked"}
 
@@ -55,8 +59,67 @@ def load_json_yaml(path: Path) -> dict[str, Any]:
 
 
 def write_json_yaml(path: Path, data: dict[str, Any]) -> None:
+    """Atomically replace a JSON-compatible YAML document."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    payload = (json.dumps(data, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False,
+    ) as stream:
+        temporary = Path(stream.name)
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def exclusive_file_lock(path: Path, timeout_seconds: float = 30.0):
+    """Serialize ledger readers/writers across local agent processes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stream = path.open("a+b")
+    deadline = time.monotonic() + timeout_seconds
+    locked = False
+    try:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    stream.seek(0)
+                    if stream.read(1) == b"":
+                        stream.write(b"0")
+                        stream.flush()
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out acquiring control-plane lock: {path}")
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if not locked:
+                pass
+            elif os.name == "nt":
+                import msvcrt
+
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
 
 
 def sha256_text(text: str) -> str:
@@ -71,9 +134,115 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def selected_source_sha256(path: Path, selector: dict[str, Any]) -> str | None:
+    """Hash a whole file or one stable Markdown heading section."""
+    kind = selector.get("kind")
+    if kind == "whole_file":
+        return file_sha256(path)
+    if kind != "markdown_heading":
+        return None
+    heading = selector.get("value")
+    occurrence = selector.get("occurrence", 1)
+    if not isinstance(heading, str) or not heading.startswith("#"):
+        return None
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    matches = [index for index, line in enumerate(lines) if line.strip() == heading]
+    if not isinstance(occurrence, int) or occurrence < 1 or occurrence > len(matches):
+        return None
+    start = matches[occurrence - 1]
+    level = len(heading) - len(heading.lstrip("#"))
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        stripped = lines[index].lstrip()
+        if not stripped.startswith("#"):
+            continue
+        candidate_level = len(stripped) - len(stripped.lstrip("#"))
+        if candidate_level <= level and stripped[candidate_level:candidate_level + 1].isspace():
+            end = index
+            break
+    return hashlib.sha256("".join(lines[start:end]).encode("utf-8")).hexdigest()
+
+
 def canonical_digest(data: dict[str, Any]) -> str:
     payload = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return sha256_text(payload)
+
+
+def _git_output(root: Path, argv: list[str]) -> tuple[int, str]:
+    try:
+        result = subprocess.run(
+            ["git", *argv], cwd=root, check=False, capture_output=True,
+            text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+    return result.returncode, result.stdout.strip()
+
+
+def skill_content_digest(skill_root: Path) -> str:
+    """Hash every normative or executable Skill resource without following links."""
+    digest = hashlib.sha256()
+    roots = (
+        skill_root / "SKILL.md", skill_root / "agents", skill_root / "references",
+        skill_root / "schemas", skill_root / "scripts", skill_root / "templates",
+    )
+    files: list[Path] = []
+    for candidate in roots:
+        if candidate.is_file() or candidate.is_symlink():
+            files.append(candidate)
+        elif candidate.is_dir():
+            files.extend(
+                path for path in candidate.rglob("*")
+                if (path.is_file() or path.is_symlink())
+                and "__pycache__" not in path.parts and path.suffix != ".pyc"
+            )
+    for path in sorted(files, key=lambda item: item.relative_to(skill_root).as_posix()):
+        relative = path.relative_to(skill_root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        if path.is_symlink():
+            digest.update(b"link\0")
+            digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+        else:
+            digest.update(b"file\0")
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def framework_binding(skill_root: Path) -> dict[str, Any]:
+    """Return the current Skill identity, content digest, and verified trust level."""
+    skill_root = skill_root.resolve()
+    content_sha256 = skill_content_digest(skill_root)
+    head_status, head = _git_output(skill_root, ["rev-parse", "HEAD"])
+    status_code, status = _git_output(skill_root, ["status", "--porcelain"])
+    dirty = head_status != 0 or status_code != 0 or bool(status)
+    revision = head if head_status == 0 and head else f"sha256:{content_sha256}"
+    trust_level = "unverified"
+    signed_tag = None
+    if not dirty and head_status == 0:
+        tag_status, tags = _git_output(skill_root, ["tag", "--points-at", "HEAD"])
+        if tag_status == 0:
+            for tag in sorted(filter(None, tags.splitlines())):
+                verified, _ = _git_output(skill_root, ["verify-tag", tag])
+                if verified == 0:
+                    signed_tag = tag
+                    trust_level = "signed_release"
+                    break
+        if trust_level == "unverified":
+            verified, _ = _git_output(skill_root, ["verify-commit", "HEAD"])
+            if verified == 0:
+                trust_level = "verified_commit"
+    return {
+        "name": "project-guardrails-harness",
+        "revision": revision,
+        "content_sha256": content_sha256,
+        "dirty": dirty,
+        "trust_level": trust_level,
+        "signed_tag": signed_tag,
+    }
 
 
 def build_traceability_graph(registry: dict[str, Any]) -> dict[str, Any]:
@@ -223,7 +392,9 @@ def validate_campaign(campaign: Any, control_ids: set[str] | None = None) -> lis
         campaign,
         {
             "id", "revision", "baseline_commit", "baseline_registry_sha256",
-            "baseline_workspace_sha256", "target_maturity", "assessed_scope", "owner", "phases",
+            "baseline_workspace_sha256", "baseline_framework_revision",
+            "baseline_framework_sha256", "target_maturity", "assessed_scope",
+            "owner", "phases",
         },
         "development_policy.active_campaign",
     )
@@ -237,6 +408,10 @@ def validate_campaign(campaign: Any, control_ids: set[str] | None = None) -> lis
         errors.append(f"{prefix}.baseline_registry_sha256 must be a SHA-256 digest")
     if not valid_sha256(campaign.get("baseline_workspace_sha256")):
         errors.append(f"{prefix}.baseline_workspace_sha256 must be a SHA-256 digest")
+    if not isinstance(campaign.get("baseline_framework_revision"), str) or not campaign["baseline_framework_revision"].strip():
+        errors.append(f"{prefix}.baseline_framework_revision is required")
+    if not valid_sha256(campaign.get("baseline_framework_sha256")):
+        errors.append(f"{prefix}.baseline_framework_sha256 must be a SHA-256 digest")
     if campaign.get("target_maturity") not in MATURITY_LEVELS:
         errors.append(f"{prefix}.target_maturity is invalid")
     if not non_empty_strings(campaign.get("assessed_scope")):
@@ -321,13 +496,14 @@ def validate_manifest(
     errors.extend(unknown_fields(
         manifest,
         {
-            "schema_version", "project", "profile", "scope", "authority",
-            "audit_policy", "development_policy", "claim_policies",
+            "schema_version", "framework", "project", "profile", "scope", "authority",
+            "audit_policy", "development_policy", "claim_policies", "evidence_policy",
         },
         "manifest",
     ))
     if manifest.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"quality manifest schema_version must be {SCHEMA_VERSION}; regenerate the v2 control plane")
+    framework = manifest.get("framework")
     project = manifest.get("project")
     profile = manifest.get("profile")
     scope = manifest.get("scope")
@@ -335,16 +511,51 @@ def validate_manifest(
     audit = manifest.get("audit_policy")
     development_policy = manifest.get("development_policy")
     claim_policies = manifest.get("claim_policies")
+    evidence_policy = manifest.get("evidence_policy")
     for name, value in (
-        ("project", project), ("profile", profile), ("scope", scope),
+        ("framework", framework), ("project", project), ("profile", profile), ("scope", scope),
         ("authority", authority), ("audit_policy", audit),
         ("development_policy", development_policy),
         ("claim_policies", claim_policies),
+        ("evidence_policy", evidence_policy),
     ):
         if not isinstance(value, dict):
             errors.append(f"manifest.{name} must be an object")
     if errors:
         return errors
+    errors.extend(unknown_fields(
+        framework,
+        {"name", "revision", "content_sha256", "dirty", "trust_level", "signed_tag"},
+        "framework",
+    ))
+    if framework.get("name") != "project-guardrails-harness":
+        errors.append("framework.name must be project-guardrails-harness")
+    if not isinstance(framework.get("revision"), str) or not framework["revision"].strip():
+        errors.append("framework.revision is required")
+    if not valid_sha256(framework.get("content_sha256")):
+        errors.append("framework.content_sha256 must be a SHA-256 digest")
+    if not isinstance(framework.get("dirty"), bool):
+        errors.append("framework.dirty must be boolean")
+    if framework.get("trust_level") not in {"unverified", "verified_commit", "signed_release"}:
+        errors.append("framework.trust_level is invalid")
+    signed_tag = framework.get("signed_tag")
+    if signed_tag is not None and (not isinstance(signed_tag, str) or not signed_tag.strip()):
+        errors.append("framework.signed_tag must be null or a non-empty string")
+    if framework.get("trust_level") == "signed_release" and signed_tag is None:
+        errors.append("framework.signed_tag is required for signed_release")
+    errors.extend(unknown_fields(
+        evidence_policy,
+        {"retention", "max_bytes", "redact_outputs", "sealing_profile"},
+        "evidence_policy",
+    ))
+    if evidence_policy.get("retention") != "permanent":
+        errors.append("evidence_policy.retention must be permanent")
+    if not isinstance(evidence_policy.get("max_bytes"), int) or evidence_policy["max_bytes"] < 1048576:
+        errors.append("evidence_policy.max_bytes must be an integer >= 1048576")
+    if evidence_policy.get("redact_outputs") is not True:
+        errors.append("evidence_policy.redact_outputs must be true")
+    if evidence_policy.get("sealing_profile") not in {"sha256_chain", "sigstore_bundle"}:
+        errors.append("evidence_policy.sealing_profile is invalid")
     errors.extend(unknown_fields(
         project, {"name", "root", "development_mode", "target_maturity"}, "project",
     ))
@@ -846,7 +1057,8 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             mapping,
             {
                 "rule_id", "source_ref", "source_sha256", "semantic_owner",
-                "control_refs", "mandatory", "status", "observed_at", "reviewed_at",
+                "source_selector", "disposition", "control_refs", "mandatory",
+                "status", "observed_at", "reviewed_at",
             },
             prefix,
         ))
@@ -861,6 +1073,25 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.source_ref must be project-relative")
         if not valid_sha256(mapping.get("source_sha256")):
             errors.append(f"{prefix}.source_sha256 must be a SHA-256 digest")
+        selector = mapping.get("source_selector")
+        if not isinstance(selector, dict):
+            errors.append(f"{prefix}.source_selector must be an object")
+        else:
+            errors.extend(unknown_fields(selector, {"kind", "value", "occurrence"}, f"{prefix}.source_selector"))
+            if selector.get("kind") not in {"whole_file", "markdown_heading"}:
+                errors.append(f"{prefix}.source_selector.kind is invalid")
+            if selector.get("kind") == "whole_file":
+                if selector.get("value") is not None or selector.get("occurrence") is not None:
+                    errors.append(f"{prefix}.source_selector whole_file values must be null")
+            elif (
+                not isinstance(selector.get("value"), str)
+                or not selector["value"].startswith("#")
+                or not isinstance(selector.get("occurrence"), int)
+                or selector["occurrence"] < 1
+            ):
+                errors.append(f"{prefix}.source_selector markdown heading is invalid")
+        if mapping.get("disposition") not in FEDERATION_DISPOSITIONS:
+            errors.append(f"{prefix}.disposition is invalid")
         if not isinstance(mapping.get("semantic_owner"), str) or not mapping["semantic_owner"].strip():
             errors.append(f"{prefix}.semantic_owner is required")
         refs = mapping.get("control_refs")
@@ -974,6 +1205,10 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             errors.append(f"{prefix}.conclusion is invalid")
         if not isinstance(run.get("workspace_sha256"), str) or len(run["workspace_sha256"]) != 64:
             errors.append(f"{prefix}.workspace_sha256 is invalid")
+        if not isinstance(run.get("framework_revision"), str) or not run["framework_revision"].strip():
+            errors.append(f"{prefix}.framework_revision is required")
+        if not valid_sha256(run.get("framework_sha256")):
+            errors.append(f"{prefix}.framework_sha256 is invalid")
         for field in ("actor", "authority_id", "execution_context"):
             if not isinstance(run.get(field), str) or not run[field].strip():
                 errors.append(f"{prefix}.{field} is required")
@@ -1058,6 +1293,10 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             errors.append(f"{prefix}.audit_stage must be an independent stage")
         if audit.get("conclusion") not in {"PASS", "FAIL", "BLOCKED", "DISPUTED"}:
             errors.append(f"{prefix}.conclusion is invalid")
+        if not isinstance(audit.get("framework_revision"), str) or not audit["framework_revision"].strip():
+            errors.append(f"{prefix}.framework_revision is required")
+        if not valid_sha256(audit.get("framework_sha256")):
+            errors.append(f"{prefix}.framework_sha256 is invalid")
         if not non_empty_strings(audit.get("reviewed_run_ids")):
             errors.append(f"{prefix}.reviewed_run_ids must be non-empty")
         elif not set(audit["reviewed_run_ids"]) <= set(runs_by_id):
@@ -1067,7 +1306,10 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             errors.append(f"{prefix}.run_id references an unknown run")
         elif any(
             audit.get(field) != audited_run.get(field)
-            for field in ("audit_stage", "authority_id", "execution_context", "conclusion")
+            for field in (
+                "audit_stage", "authority_id", "execution_context", "conclusion",
+                "framework_revision", "framework_sha256",
+            )
         ):
             errors.append(f"{prefix} does not match its audit run")
     for index, claim in enumerate(ledger.get("claims", [])):
@@ -1078,6 +1320,10 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             errors.append(f"{prefix}.claim_scope is invalid")
         if claim.get("outcome") not in {"COMPLETED", "PASS"}:
             errors.append(f"{prefix}.outcome is invalid")
+        if not isinstance(claim.get("framework_revision"), str) or not claim["framework_revision"].strip():
+            errors.append(f"{prefix}.framework_revision is required")
+        if not valid_sha256(claim.get("framework_sha256")):
+            errors.append(f"{prefix}.framework_sha256 is invalid")
         if not non_empty_strings(claim.get("control_ids")):
             errors.append(f"{prefix}.control_ids must be non-empty")
         supporting = claim.get("supporting_run_ids")
@@ -1088,7 +1334,10 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             run = runs_by_id[run_id]
             if any(
                 claim.get(field) != run.get(field)
-                for field in ("commit", "workspace_sha256", "registry_sha256", "target_maturity")
+                for field in (
+                    "commit", "workspace_sha256", "registry_sha256", "target_maturity",
+                    "framework_revision", "framework_sha256",
+                )
             ):
                 errors.append(f"{prefix} has stale supporting run {run_id}")
             if run.get("audit_stage") not in claim.get("audit_stages", []):

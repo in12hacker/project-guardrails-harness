@@ -304,7 +304,7 @@ def sec_profile(scan: dict) -> str:
         "",
         "_The scanner deliberately does not classify the project — that is a judgment call for you. Read the README excerpt + dependencies, then state the profile in your own words before writing rules._",
         "",
-        f"- Root: `{scan.get('root')}`",
+        "- Root: `.`",
         f"- Languages: {', '.join(languages) or 'unknown'}",
         f"- CI present: {yes(ci)}" + (f" (`{', '.join(ci[:5])}`)" if ci else ""),
         f"- Tests sampled: {len(scan.get('test_files_sample', []))}",

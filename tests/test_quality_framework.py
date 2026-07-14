@@ -143,6 +143,7 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual("single_form", manifest["profile"]["build_topology"])
         self.assertEqual("none", manifest["profile"]["persistent_state"])
         self.assertEqual("accepted", manifest["profile"]["external_contributions"])
+        self.assertEqual(".", manifest["project"]["root"])
         self.assertEqual("environment_managed", manifest["profile"]["skill_deployment"])
         self.assertEqual("open_source", manifest["evidence_policy"]["profile"])
         self.assertEqual(
@@ -976,6 +977,38 @@ class QualityFrameworkTest(unittest.TestCase):
         result = self.run_evaluator(project, "--dry-run")
         self.assertEqual(1, result.returncode)
         self.assertIn("active Skill revision/content/trust differs", result.stderr)
+
+    def test_evidence_uses_project_relative_paths(self) -> None:
+        project = self.make_project()
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        file_control = next(
+            control for control in registry["controls"]
+            if control["execution"]["type"] == "file_exists"
+        )
+        result = self.run_evaluator(project, "--run", "--control", file_control["id"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        file_control["execution"] = {
+            "type": "command", "command": [sys.executable, "-c", "pass"],
+            "cwd": ".", "timeout_seconds": 10, "authorization_required": False,
+        }
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, sync.returncode, sync.stderr)
+        result = self.run_evaluator(project, "--run", "--control", file_control["id"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        ledger = json.loads(
+            (project / ".guardrails" / "evidence-ledger.json").read_text()
+        )
+        file_result = ledger["runs"][-2]["results"][0]
+        command_result = ledger["runs"][-1]["results"][0]
+        self.assertFalse(Path(file_result["path"]).is_absolute())
+        self.assertFalse(Path(command_result["cwd"]).is_absolute())
 
     def test_scanner_excludes_gitignored_local_instruction_overrides(self) -> None:
         project = Path(tempfile.mkdtemp(prefix="quality-scan-ignore-test-"))

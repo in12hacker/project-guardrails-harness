@@ -378,7 +378,7 @@ def execute_control(
         passed = exists if kind == "file_exists" else not exists
         result.update({
             "status": "PASS" if passed else "FAIL",
-            "path": str(path),
+            "path": path.relative_to(root).as_posix(),
             "detail": "path condition satisfied" if passed else "path condition failed",
         })
         return result
@@ -444,7 +444,7 @@ def execute_control(
         result.update({
             "status": "PASS" if passed else "FAIL",
             "command": argv,
-            "cwd": str(cwd),
+            "cwd": cwd.relative_to(root).as_posix(),
             "exit_code": exit_code,
             "duration_seconds": round(time.monotonic() - start, 3),
             "output_sha256": output_digest,

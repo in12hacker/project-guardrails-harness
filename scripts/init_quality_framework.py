@@ -755,7 +755,7 @@ def main() -> int:
         "framework": framework_binding(script_dir.parent),
         "project": {
             "name": args.project_name or root.name,
-            "root": str(root),
+            "root": ".",
             "development_mode": args.development_mode,
             "target_maturity": args.target_maturity,
         },

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +149,9 @@ class QualityFrameworkTest(unittest.TestCase):
         for markdown in guardrails.rglob("*.md"):
             with self.subTest(markdown=markdown.name):
                 self.assertTrue(all(line == line.rstrip() for line in markdown.read_text().splitlines()))
+        supply_chain = (guardrails / "supply-chain.md").read_text()
+        for label in ("Produce", "Publish", "Verify at deploy", "Gate incoming deps"):
+            self.assertIn(f"- **{label}:**", supply_chain)
         self.assertEqual("environment_managed", manifest["profile"]["skill_deployment"])
         self.assertEqual("open_source", manifest["evidence_policy"]["profile"])
         self.assertEqual(
@@ -311,6 +316,7 @@ class QualityFrameworkTest(unittest.TestCase):
 
     def test_command_output_is_redacted_and_persisted_for_cross_audit(self) -> None:
         project = self.make_project()
+        secret = f"{project}/secret-value"
         registry_path = project / ".guardrails" / "control-registry.yaml"
         registry = json.loads(registry_path.read_text())
         control = registry["controls"][0]
@@ -318,8 +324,10 @@ class QualityFrameworkTest(unittest.TestCase):
             "type": "command",
             "command": [
                 sys.executable, "-c",
-                "print('\\x1b[31mAuthorization: Bearer top-secret-token\\x1b[0m'); "
-                f"print({str(project)!r})",
+                "import os, sys; token=os.environ['QUALITY_TEST_TOKEN']; "
+                "print('\\x1b[31mAuthorization: Bearer '+token+'\\x1b[0m'); "
+                f"print({str(project)!r}); "
+                "sys.stdout.write('\\x1b]0;hidden-title\\x07visible\\rrewritten\\b!\\n')",
             ],
             "cwd": ".",
             "timeout_seconds": 10,
@@ -331,7 +339,8 @@ class QualityFrameworkTest(unittest.TestCase):
             check=False, capture_output=True, text=True,
         )
         self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
-        result = self.run_evaluator(project, "--run", "--control", control["id"])
+        with mock.patch.dict(os.environ, {"QUALITY_TEST_TOKEN": secret}):
+            result = self.run_evaluator(project, "--run", "--control", control["id"])
         self.assertEqual(result.returncode, 0, result.stderr)
         ledger = json.loads(
             (project / ".guardrails" / "evidence-ledger.json").read_text()
@@ -340,16 +349,24 @@ class QualityFrameworkTest(unittest.TestCase):
         output_path = project / observation["output_ref"]
         self.assertTrue(output_path.is_file())
         persisted = output_path.read_text()
-        self.assertNotIn("top-secret-token", persisted)
+        self.assertNotIn(secret, persisted)
+        self.assertNotIn("secret-value", persisted)
+        self.assertNotIn("hidden-title", persisted)
         self.assertNotIn("\x1b", persisted)
+        self.assertFalse(any(
+            (ord(character) < 32 and character not in "\n\t")
+            or 127 <= ord(character) <= 159
+            for character in persisted
+        ))
         self.assertIn("Bearer [REDACTED]", persisted)
         self.assertNotIn(str(project), persisted)
         self.assertIn("[PROJECT_ROOT]", persisted)
         for stage in ("cross", "release_authority"):
-            audited = self.run_evaluator(
-                project, "--run", "--audit-stage", stage,
-                "--actor", f"fixture-{stage}", "--control", control["id"],
-            )
+            with mock.patch.dict(os.environ, {"QUALITY_TEST_TOKEN": secret}):
+                audited = self.run_evaluator(
+                    project, "--run", "--audit-stage", stage,
+                    "--actor", f"fixture-{stage}", "--control", control["id"],
+                )
             self.assertEqual(audited.returncode, 0, audited.stderr)
         task = self.run_evaluator(
             project, "--claim", "--claim-scope", "task", "--control", control["id"],
@@ -996,8 +1013,10 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         result = self.run_evaluator(project, "--run", "--control", file_control["id"])
         self.assertEqual(0, result.returncode, result.stderr)
+        script = project / "absolute-command.py"
+        script.write_text("pass\n", encoding="utf-8")
         file_control["execution"] = {
-            "type": "command", "command": [sys.executable, "-c", "pass"],
+            "type": "command", "command": [sys.executable, str(script)],
             "cwd": ".", "timeout_seconds": 10, "authorization_required": False,
         }
         registry_path = project / ".guardrails" / "control-registry.yaml"
@@ -1016,6 +1035,10 @@ class QualityFrameworkTest(unittest.TestCase):
         command_result = ledger["runs"][-1]["results"][0]
         self.assertFalse(Path(file_result["path"]).is_absolute())
         self.assertFalse(Path(command_result["cwd"]).is_absolute())
+        persisted_command = json.dumps(command_result["command"])
+        self.assertNotIn(str(project), persisted_command)
+        self.assertIn("[PROJECT_ROOT]", persisted_command)
+        self.assertRegex(command_result["command_sha256"], r"^[0-9a-f]{64}$")
 
     def test_scanner_excludes_gitignored_local_instruction_overrides(self) -> None:
         project = Path(tempfile.mkdtemp(prefix="quality-scan-ignore-test-"))

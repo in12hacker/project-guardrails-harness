@@ -735,10 +735,10 @@ def sec_supply_chain() -> str:
         "| `source_controls_verified` | versioned SLSA Source controls/attestations | build-system integrity |",
         "| `release_grade_supply_chain_assurance` | the full ladder above | — |",
         "",
-        "**Produce:** Sigstore-signed build provenance (`gh attestation build`, npm `--provenance`, `cosign sign`).",
-        "**Publish:** Trusted Publishing / OIDC — no long-lived registry tokens.",
-        "**Verify at deploy:** `gh attestation verify` / `slsa-verifier` / OPA Gatekeeper for admitted images.",
-        "**Gate incoming deps:** OpenSSF Scorecard / GitHub dependency-review.",
+        "- **Produce:** Sigstore-signed build provenance (`gh attestation build`, npm `--provenance`, `cosign sign`).",
+        "- **Publish:** Trusted Publishing / OIDC — no long-lived registry tokens.",
+        "- **Verify at deploy:** `gh attestation verify` / `slsa-verifier` / OPA Gatekeeper for admitted images.",
+        "- **Gate incoming deps:** OpenSSF Scorecard / GitHub dependency-review.",
         "Reject any \"release-grade\" claim built on a dependency scan alone, or provenance that is produced but never verified.",
     ])
 

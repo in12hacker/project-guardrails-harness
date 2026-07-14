@@ -41,7 +41,15 @@ from quality_common import (
 
 OUTPUT_LIMIT_BYTES = 64 * 1024
 BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+")
-ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+OSC_ESCAPE_PATTERN = re.compile(
+    r"(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)", re.DOTALL,
+)
+STRING_ESCAPE_PATTERN = re.compile(
+    r"(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c|$)", re.DOTALL,
+)
+CSI_ESCAPE_PATTERN = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
+SINGLE_ESCAPE_PATTERN = re.compile(r"\x1b[@-Z\\-_]")
+CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 TRUNCATION_MARKER_TEMPLATE = (
     "\n--- OUTPUT TRUNCATED; OMITTED_BYTES={omitted:020d}; TAIL_FOLLOWS ---\n"
 )
@@ -91,17 +99,40 @@ def artifact_evidence(
     return artifacts, missing, None
 
 
-def redact_output(raw: bytes, root: Path) -> str:
-    """Return bounded evidence output with credentials and checkout paths removed."""
-    text = raw.decode("utf-8", errors="replace")
-    text = ANSI_ESCAPE_PATTERN.sub("", text)
-    text = text.replace(str(root.resolve()), "[PROJECT_ROOT]")
-    for name, value in os.environ.items():
+def normalize_terminal_text(text: str) -> str:
+    """Remove terminal instructions while preserving readable diagnostic text."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = OSC_ESCAPE_PATTERN.sub("", text)
+    text = STRING_ESCAPE_PATTERN.sub("", text)
+    text = CSI_ESCAPE_PATTERN.sub("", text)
+    text = SINGLE_ESCAPE_PATTERN.sub("", text)
+    return CONTROL_CHARACTER_PATTERN.sub("", text)
+
+
+def redact_text(text: str, root: Path) -> str:
+    """Remove credentials before replacing checkout-specific path text."""
+    sensitive_values = {
+        value
+        for name, value in os.environ.items()
         if value and len(value) >= 4 and any(
             marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
-        ):
-            text = text.replace(value, "[REDACTED]")
-    return BEARER_PATTERN.sub(r"\1[REDACTED]", text)
+        )
+    }
+    for value in sorted(sensitive_values, key=len, reverse=True):
+        text = text.replace(value, "[REDACTED]")
+    text = BEARER_PATTERN.sub(r"\1[REDACTED]", text)
+    checkout = root.resolve()
+    checkout_forms = {str(checkout), checkout.as_posix()}
+    for value in sorted(checkout_forms, key=len, reverse=True):
+        if value and value != checkout.anchor:
+            text = text.replace(value, "[PROJECT_ROOT]")
+    return text
+
+
+def redact_output(raw: bytes, root: Path) -> str:
+    """Return bounded evidence output with terminal controls and secrets removed."""
+    text = normalize_terminal_text(raw.decode("utf-8", errors="replace"))
+    return redact_text(text, root)
 
 
 def persist_output(root: Path, evidence_dir: Path, text: str) -> tuple[str, str, int]:
@@ -446,7 +477,8 @@ def execute_control(
             )
         result.update({
             "status": "PASS" if passed else "FAIL",
-            "command": argv,
+            "command": [redact_text(part, root) for part in argv],
+            "command_sha256": canonical_digest({"argv": argv}),
             "cwd": cwd.relative_to(root).as_posix(),
             "exit_code": exit_code,
             "duration_seconds": round(time.monotonic() - start, 3),

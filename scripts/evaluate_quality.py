@@ -90,9 +90,10 @@ def artifact_evidence(
     return artifacts, missing, None
 
 
-def redact_output(raw: bytes) -> str:
-    """Return bounded evidence output with common credentials removed."""
+def redact_output(raw: bytes, root: Path) -> str:
+    """Return bounded evidence output with credentials and checkout paths removed."""
     text = raw.decode("utf-8", errors="replace")
+    text = text.replace(str(root.resolve()), "[PROJECT_ROOT]")
     for name, value in os.environ.items():
         if value and len(value) >= 4 and any(
             marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
@@ -420,7 +421,7 @@ def execute_control(
             raw_output_sha256, raw_output_bytes = digest_file(Path(output.name))
             raw_output, output_truncated = bounded_output(Path(output.name))
         redacted_output, redaction_truncated = bounded_redacted_output(
-            redact_output(raw_output),
+            redact_output(raw_output, root),
         )
         output_ref, output_digest, output_bytes = persist_output(
             root, evidence_dir, redacted_output,

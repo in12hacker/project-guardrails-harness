@@ -318,7 +318,8 @@ class QualityFrameworkTest(unittest.TestCase):
             "type": "command",
             "command": [
                 sys.executable, "-c",
-                "print('Authorization: Bearer top-secret-token')",
+                "print('Authorization: Bearer top-secret-token'); "
+                f"print({str(project)!r})",
             ],
             "cwd": ".",
             "timeout_seconds": 10,
@@ -341,6 +342,8 @@ class QualityFrameworkTest(unittest.TestCase):
         persisted = output_path.read_text()
         self.assertNotIn("top-secret-token", persisted)
         self.assertIn("Bearer [REDACTED]", persisted)
+        self.assertNotIn(str(project), persisted)
+        self.assertIn("[PROJECT_ROOT]", persisted)
         for stage in ("cross", "release_authority"):
             audited = self.run_evaluator(
                 project, "--run", "--audit-stage", stage,

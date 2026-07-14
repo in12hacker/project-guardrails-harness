@@ -144,6 +144,9 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual("none", manifest["profile"]["persistent_state"])
         self.assertEqual("accepted", manifest["profile"]["external_contributions"])
         self.assertEqual(".", manifest["project"]["root"])
+        for markdown in guardrails.rglob("*.md"):
+            with self.subTest(markdown=markdown.name):
+                self.assertTrue(all(line == line.rstrip() for line in markdown.read_text().splitlines()))
         self.assertEqual("environment_managed", manifest["profile"]["skill_deployment"])
         self.assertEqual("open_source", manifest["evidence_policy"]["profile"])
         self.assertEqual(

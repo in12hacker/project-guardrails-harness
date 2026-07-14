@@ -291,7 +291,7 @@ def readme_excerpt(root: Path) -> str:
                 lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
             except OSError:
                 return ""
-            return "\n".join(ln.rstrip() for ln in lines if ln.strip())[:1200]
+            return "\n".join(ln.rstrip() for ln in lines if ln.strip())[:1200].rstrip()
     return ""
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import datetime as dt
 import tempfile
@@ -34,6 +35,7 @@ FEDERATION_STATUSES = {"current", "stale", "disputed", "unmapped"}
 FEDERATION_DISPOSITIONS = {"federated", "migrated", "compiled", "retired"}
 DEBT_STATUSES = {"open", "closed"}
 EXEMPTION_STATUSES = {"active", "expired", "revoked"}
+ARCHIVE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 DEPENDENCY_MUTATION_PREFIXES = {
     ("npm", "install"), ("npm", "i"), ("pnpm", "install"),
@@ -134,6 +136,14 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def valid_archive_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and value not in {".", ".."}
+        and ARCHIVE_ID_PATTERN.fullmatch(value) is not None
+    )
+
+
 def selected_source_sha256(path: Path, selector: dict[str, Any]) -> str | None:
     """Hash a whole file or one stable Markdown heading section."""
     kind = selector.get("kind")
@@ -217,7 +227,13 @@ def framework_binding(skill_root: Path) -> dict[str, Any]:
     skill_root = skill_root.resolve()
     content_sha256 = skill_content_digest(skill_root)
     head_status, head = _git_output(skill_root, ["rev-parse", "HEAD"])
-    status_code, status = _git_output(skill_root, ["status", "--porcelain"])
+    status_code, status = _git_output(
+        skill_root,
+        [
+            "status", "--porcelain", "--", "SKILL.md", "agents", "references",
+            "schemas", "scripts", "templates",
+        ],
+    )
     dirty = head_status != 0 or status_code != 0 or bool(status)
     revision = head if head_status == 0 and head else f"sha256:{content_sha256}"
     trust_level = "unverified"
@@ -545,17 +561,54 @@ def validate_manifest(
         errors.append("framework.signed_tag is required for signed_release")
     errors.extend(unknown_fields(
         evidence_policy,
-        {"retention", "max_bytes", "redact_outputs", "sealing_profile"},
+        {
+            "profile", "retention", "max_active_bytes", "redact_outputs",
+            "sealing_profile", "predecessor_archive",
+        },
         "evidence_policy",
     ))
-    if evidence_policy.get("retention") != "permanent":
-        errors.append("evidence_policy.retention must be permanent")
-    if not isinstance(evidence_policy.get("max_bytes"), int) or evidence_policy["max_bytes"] < 1048576:
-        errors.append("evidence_policy.max_bytes must be an integer >= 1048576")
+    evidence_profile = evidence_policy.get("profile")
+    retention = evidence_policy.get("retention")
+    sealing_profile = evidence_policy.get("sealing_profile")
+    if evidence_profile not in {"open_source", "commercial", "regulated", "custom"}:
+        errors.append("evidence_policy.profile is invalid")
+    if retention not in {"project_lifetime", "release_lifetime", "permanent"}:
+        errors.append("evidence_policy.retention is invalid")
+    if (
+        not isinstance(evidence_policy.get("max_active_bytes"), int)
+        or evidence_policy["max_active_bytes"] < 1048576
+    ):
+        errors.append("evidence_policy.max_active_bytes must be an integer >= 1048576")
     if evidence_policy.get("redact_outputs") is not True:
         errors.append("evidence_policy.redact_outputs must be true")
-    if evidence_policy.get("sealing_profile") not in {"sha256_chain", "sigstore_bundle"}:
+    if sealing_profile not in {"sha256_chain", "sigstore_bundle"}:
         errors.append("evidence_policy.sealing_profile is invalid")
+    if evidence_profile in {"commercial", "regulated"}:
+        if retention != "permanent":
+            errors.append(f"{evidence_profile} evidence requires permanent retention")
+        if sealing_profile != "sigstore_bundle":
+            errors.append(f"{evidence_profile} evidence requires sigstore_bundle sealing")
+    predecessor = evidence_policy.get("predecessor_archive")
+    if predecessor is not None:
+        if not isinstance(predecessor, dict):
+            errors.append("evidence_policy.predecessor_archive must be null or an object")
+        else:
+            errors.extend(unknown_fields(
+                predecessor,
+                {"archive_id", "archive_sha256", "validation_status", "signature_status"},
+                "evidence_policy.predecessor_archive",
+            ))
+            if not valid_archive_id(predecessor.get("archive_id")):
+                errors.append("evidence_policy.predecessor_archive.archive_id is invalid")
+            if not valid_sha256(predecessor.get("archive_sha256")):
+                errors.append("evidence_policy.predecessor_archive.archive_sha256 is invalid")
+            if predecessor.get("validation_status") not in {"validated", "legacy_unvalidated"}:
+                errors.append("evidence_policy.predecessor_archive.validation_status is invalid")
+            if predecessor.get("signature_status") not in {
+                "digest_only", "pending_external_signature", "verified_external_signature",
+                "untrusted",
+            }:
+                errors.append("evidence_policy.predecessor_archive.signature_status is invalid")
     errors.extend(unknown_fields(
         project, {"name", "root", "development_mode", "target_maturity"}, "project",
     ))
@@ -565,7 +618,8 @@ def validate_manifest(
             "product_types", "distribution_model", "target_markets", "criticality",
             "data_sensitivity", "deployment_models", "support_model", "primary_users",
             "public_contracts", "build_topology", "persistent_state",
-            "external_contributions", "ai_system", "legal_profiles", "quality_dimensions",
+            "external_contributions", "skill_deployment", "ai_system", "legal_profiles",
+            "quality_dimensions",
         },
         "profile",
     ))
@@ -589,6 +643,7 @@ def validate_manifest(
         "profile.build_topology": profile.get("build_topology"),
         "profile.persistent_state": profile.get("persistent_state"),
         "profile.external_contributions": profile.get("external_contributions"),
+        "profile.skill_deployment": profile.get("skill_deployment"),
     }
     for name, value in required_strings.items():
         if not isinstance(value, str) or not value or value == "REQUIRED":
@@ -607,6 +662,7 @@ def validate_manifest(
         "build_topology": {"single_form", "multi_form", "cross_target"},
         "persistent_state": {"none", "database", "indexed_store", "on_disk_format", "client_state", "mixed"},
         "external_contributions": {"accepted", "restricted", "closed"},
+        "skill_deployment": {"environment_managed", "project_symlink", "vendored"},
     }
     for name, allowed in enum_fields.items():
         if profile.get(name) not in allowed:
@@ -1259,10 +1315,19 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
                     if (
                         not isinstance(artifact, dict)
                         or not safe_relative_path(artifact.get("path"))
+                        or not safe_relative_path(artifact.get("evidence_ref"))
                         or not valid_sha256(artifact.get("sha256"))
                         or not isinstance(artifact.get("bytes"), int)
                     ):
                         errors.append(f"{artifact_prefix} has an invalid evidence binding")
+                    elif root is not None:
+                        evidence_path = path_inside_root(root, artifact["evidence_ref"])
+                        if evidence_path is None or not evidence_path.is_file():
+                            errors.append(f"{artifact_prefix} immutable evidence is missing")
+                        elif file_sha256(evidence_path) != artifact["sha256"]:
+                            errors.append(f"{artifact_prefix} immutable evidence digest mismatch")
+                        elif evidence_path.stat().st_size != artifact["bytes"]:
+                            errors.append(f"{artifact_prefix} immutable evidence size mismatch")
     runs_by_id = {
         run.get("run_id"): run for run in runs
         if isinstance(run, dict) and isinstance(run.get("run_id"), str)

@@ -16,8 +16,12 @@ from pathlib import Path
 from quality_common import (
     MATURITY_LEVELS,
     build_traceability_graph,
+    canonical_digest,
     file_sha256,
     framework_binding,
+    load_json_yaml,
+    safe_relative_path,
+    valid_archive_id,
     write_json_yaml,
 )
 
@@ -29,6 +33,79 @@ QUALITY_DIMENSIONS = [
 ]
 
 CHECKOUT_V7_SHA = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
+ACTIVE_PLANE_ENTRIES = (
+    "quality-manifest.yaml", "control-registry.yaml", "evidence-ledger.json",
+    "traceability-graph.json", "evidence", "INDEX.md", "profile.md", "owners.md",
+    "rules", "cleanliness.md", "harness.md", "supply-chain.md", "memory.md",
+    "decisions.md", "DEVELOPMENT-HANDOFF.md", "RULE-CONSOLIDATION-AUDIT.md",
+    "preflight.py", "run-quality-gates.py",
+)
+
+
+def predecessor_archive_binding(out_dir: Path, archive_id: str | None) -> dict | None:
+    if archive_id is None:
+        return None
+    if not valid_archive_id(archive_id):
+        raise ValueError("--predecessor-archive-id is not a valid archive id")
+    path = out_dir / "archive" / archive_id / "archive-manifest.json"
+    if path.is_symlink():
+        raise ValueError("predecessor archive manifest cannot be a symbolic link")
+    archive = load_json_yaml(path)
+    archive_dir = path.parent
+    recorded_digest = archive.get("archive_sha256")
+    digest_input = {key: value for key, value in archive.items() if key != "archive_sha256"}
+    if archive.get("archive_id") != archive_id:
+        raise ValueError("predecessor archive id does not match its manifest")
+    if recorded_digest != canonical_digest(digest_input):
+        raise ValueError("predecessor archive manifest digest is invalid")
+    if archive.get("validation_status") not in {"validated", "legacy_unvalidated"}:
+        raise ValueError("predecessor archive validation status is invalid")
+    if archive.get("signature_status") not in {
+        "digest_only", "pending_external_signature", "verified_external_signature", "untrusted",
+    }:
+        raise ValueError("predecessor archive signature status is invalid")
+    inventory = archive.get("files")
+    if not isinstance(inventory, list):
+        raise ValueError("predecessor archive file inventory is invalid")
+    expected_paths: set[str] = set()
+    for item in inventory:
+        if not isinstance(item, dict) or not safe_relative_path(item.get("path")):
+            raise ValueError("predecessor archive contains an invalid file path")
+        relative = item["path"]
+        if relative in expected_paths:
+            raise ValueError("predecessor archive contains duplicate file paths")
+        expected_paths.add(relative)
+        candidate = archive_dir / relative
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ValueError(f"predecessor archive file is missing or linked: {relative}")
+        if file_sha256(candidate) != item.get("sha256"):
+            raise ValueError(f"predecessor archive file digest mismatch: {relative}")
+        if candidate.stat().st_size != item.get("bytes"):
+            raise ValueError(f"predecessor archive file size mismatch: {relative}")
+    if any(item.is_symlink() for item in archive_dir.rglob("*")):
+        raise ValueError("predecessor archive contains a symbolic link")
+    actual_paths = {
+        item.relative_to(archive_dir).as_posix()
+        for item in archive_dir.rglob("*")
+        if item.is_file() and item != path
+    }
+    if actual_paths != expected_paths:
+        raise ValueError("predecessor archive inventory does not match archived files")
+    return {
+        "archive_id": archive_id,
+        "archive_sha256": recorded_digest,
+        "validation_status": archive["validation_status"],
+        "signature_status": archive["signature_status"],
+    }
+
+
+def reset_active_plane(out_dir: Path) -> None:
+    for name in ACTIVE_PLANE_ENTRIES:
+        path = out_dir / name
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
 
 
 def federated_rule_inventory(root: Path, scan: dict) -> list[dict]:
@@ -578,6 +655,16 @@ def parse_args() -> argparse.Namespace:
                         choices=("none", "database", "indexed_store", "on_disk_format", "client_state", "mixed"))
     parser.add_argument("--external-contributions", required=True,
                         choices=("accepted", "restricted", "closed"))
+    parser.add_argument("--skill-deployment", required=True,
+                        choices=("environment_managed", "project_symlink", "vendored"))
+    parser.add_argument("--evidence-profile", required=True,
+                        choices=("open_source", "commercial", "regulated", "custom"))
+    parser.add_argument("--evidence-retention", required=True,
+                        choices=("project_lifetime", "release_lifetime", "permanent"))
+    parser.add_argument("--evidence-max-active-bytes", required=True, type=int)
+    parser.add_argument("--evidence-sealing-profile", required=True,
+                        choices=("sha256_chain", "sigstore_bundle"))
+    parser.add_argument("--predecessor-archive-id")
     ai_group = parser.add_mutually_exclusive_group(required=True)
     ai_group.add_argument("--ai-system", action="store_true")
     ai_group.add_argument("--no-ai-system", action="store_false", dest="ai_system")
@@ -597,11 +684,33 @@ def main() -> int:
     if "none" in args.public_contract and len(args.public_contract) != 1:
         print("--public-contract none cannot be combined with another contract type", file=sys.stderr)
         return 2
+    if args.evidence_max_active_bytes < 1048576:
+        print("--evidence-max-active-bytes must be at least 1048576", file=sys.stderr)
+        return 2
+    if args.evidence_profile in {"commercial", "regulated"} and (
+        args.evidence_retention != "permanent"
+        or args.evidence_sealing_profile != "sigstore_bundle"
+    ):
+        print(
+            f"{args.evidence_profile} evidence requires permanent retention and "
+            "sigstore_bundle sealing",
+            file=sys.stderr,
+        )
+        return 2
     root = Path(args.root).resolve()
     out_dir = (root / args.out_dir).resolve() if not Path(args.out_dir).is_absolute() else Path(args.out_dir)
     if out_dir.exists() and any(out_dir.iterdir()) and not args.force:
         print(f"refusing to overwrite non-empty {out_dir}; use --force after review", file=sys.stderr)
         return 2
+    try:
+        predecessor_archive = predecessor_archive_binding(
+            out_dir, args.predecessor_archive_id,
+        )
+    except ValueError as exc:
+        print(f"invalid predecessor archive: {exc}", file=sys.stderr)
+        return 2
+    if predecessor_archive is not None and args.force:
+        reset_active_plane(out_dir)
 
     script_dir = Path(__file__).resolve().parent
     if args.scan:
@@ -663,6 +772,7 @@ def main() -> int:
             "build_topology": args.build_topology,
             "persistent_state": args.persistent_state,
             "external_contributions": args.external_contributions,
+            "skill_deployment": args.skill_deployment,
             "ai_system": args.ai_system,
             "legal_profiles": args.legal_profile,
             "quality_dimensions": QUALITY_DIMENSIONS,
@@ -682,10 +792,12 @@ def main() -> int:
             ],
         },
         "evidence_policy": {
-            "retention": "permanent",
-            "max_bytes": 1073741824,
+            "profile": args.evidence_profile,
+            "retention": args.evidence_retention,
+            "max_active_bytes": args.evidence_max_active_bytes,
             "redact_outputs": True,
-            "sealing_profile": "sigstore_bundle",
+            "sealing_profile": args.evidence_sealing_profile,
+            "predecessor_archive": predecessor_archive,
         },
         "audit_policy": {
             "required_stages": required_audits,

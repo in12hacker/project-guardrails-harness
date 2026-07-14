@@ -63,7 +63,9 @@ def digest_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def artifact_evidence(root: Path, execution: dict) -> tuple[list[dict], list[str]]:
+def artifact_evidence(
+    root: Path, execution: dict, evidence_dir: Path, max_active_bytes: int,
+) -> tuple[list[dict], list[str], str | None]:
     artifacts: list[dict] = []
     missing: list[str] = []
     for raw in execution.get("artifact_paths", []):
@@ -72,8 +74,20 @@ def artifact_evidence(root: Path, execution: dict) -> tuple[list[dict], list[str
             missing.append(raw)
             continue
         digest, size = digest_file(path)
-        artifacts.append({"path": raw, "sha256": digest, "bytes": size})
-    return artifacts, missing
+        destination = evidence_dir / f"{digest}.artifact{path.suffix}"
+        additional_bytes = 0 if destination.exists() else size
+        if control_plane_bytes(evidence_dir.parents[1]) + additional_bytes > max_active_bytes:
+            return artifacts, missing, f"artifact exceeds active evidence budget: {raw}"
+        evidence_ref, digest, size = persist_evidence_file(
+            root, evidence_dir, path, f".artifact{path.suffix}",
+        )
+        artifacts.append({
+            "path": raw,
+            "evidence_ref": evidence_ref,
+            "sha256": digest,
+            "bytes": size,
+        })
+    return artifacts, missing, None
 
 
 def redact_output(raw: bytes) -> str:
@@ -102,9 +116,15 @@ def persist_output(root: Path, evidence_dir: Path, text: str) -> tuple[str, str,
 
 
 def control_plane_bytes(guardrails: Path) -> int:
-    """Return current persistent control-plane bytes without following symlinks."""
+    """Return active control-plane bytes, excluding immutable archive history."""
     total = 0
     for path in guardrails.rglob("*"):
+        try:
+            relative = path.relative_to(guardrails)
+        except ValueError:
+            continue
+        if relative.parts and relative.parts[0] == "archive":
+            continue
         if path.name == ".ledger.lock" or path.is_symlink() or not path.is_file():
             continue
         total += path.stat().st_size
@@ -282,6 +302,7 @@ def execute_control(
     capabilities: dict[str, dict],
     baselines: dict[str, dict],
     evidence_dir: Path,
+    evidence_limit: int,
 ) -> dict:
     control_id = control["id"]
     execution = control["execution"]
@@ -404,7 +425,9 @@ def execute_control(
         output_ref, output_digest, output_bytes = persist_output(
             root, evidence_dir, redacted_output,
         )
-        artifacts, missing_artifacts = artifact_evidence(root, execution)
+        artifacts, missing_artifacts, artifact_budget_error = artifact_evidence(
+            root, execution, evidence_dir, evidence_limit,
+        )
         passed = exit_code == 0 and not timed_out and not missing_artifacts
         debt_observation = None
         ratchet_error = None
@@ -432,6 +455,13 @@ def execute_control(
             "output_truncated": output_truncated or redaction_truncated,
             "artifacts": artifacts,
         })
+        if artifact_budget_error:
+            result.update({
+                "status": "BLOCKED",
+                "blocker_kind": "evidence",
+                "detail": artifact_budget_error,
+            })
+            return result
         if debt_observation is not None:
             result["debt_observation"] = debt_observation
         if timed_out:
@@ -771,7 +801,7 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
         return 0
 
     projected_reserve = OUTPUT_LIMIT_BYTES * max(1, len(controls)) + OUTPUT_LIMIT_BYTES
-    evidence_limit = manifest["evidence_policy"]["max_bytes"]
+    evidence_limit = manifest["evidence_policy"]["max_active_bytes"]
     try:
         evidence_usage = control_plane_bytes(guardrails)
     except OSError as exc:
@@ -779,8 +809,8 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
         return 1
     if evidence_usage + projected_reserve > evidence_limit:
         print(
-            f"BLOCKED [QF-EVIDENCE]: permanent evidence budget would exceed "
-            f"{evidence_limit} bytes; seal or compact the active plane before execution",
+            f"BLOCKED [QF-EVIDENCE]: active evidence budget would exceed "
+            f"{evidence_limit} bytes; compact or rotate the active plane after sealing",
             file=sys.stderr,
         )
         return 1
@@ -1006,6 +1036,7 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
         execute_control(
             root, control, authorized, capabilities, baselines,
             guardrails / "evidence" / "outputs",
+            evidence_limit,
         )
         for control in controls
     ]

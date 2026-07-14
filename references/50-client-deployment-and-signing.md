@@ -2,18 +2,24 @@
 
 ## Deployment contract
 
-The shared Skill is external to the product repository. For repositories used by both Codex and Claude, create two project-local links to the same checkout:
+Select and record one deployment mode during initialization:
+
+- `environment_managed`: the client or execution environment provides the reviewed Skill path;
+- `project_symlink`: client-specific project links point to one external checkout;
+- `vendored`: the repository owns a reviewed copy and updates it through ordinary dependency review.
+
+For a repository that explicitly selects `project_symlink` and uses both Codex and Claude, links may be:
 
 ```text
 .agents/skills/project-guardrails-harness -> /absolute/path/project-guardrails-harness
 .claude/skills/project-guardrails-harness -> /absolute/path/project-guardrails-harness
 ```
 
-Ignore only these links. Commit `.guardrails/` because it is the project-specific expansion: profile, owners, controls, evidence, decisions, and product acceptance configuration are part of the project. Ignore only runtime lock files.
+Ignore only project-local links. Commit `.guardrails/` because it is the project-specific expansion: profile, owners, controls, evidence, decisions, and product acceptance configuration are part of the project. Ignore only runtime lock files.
 
 Keep `AGENTS.md` and `CLAUDE.md` as short generated adapters. `AGENTS.md` points to `.guardrails/INDEX.md` and states project identity plus immediate hard stops. `CLAUDE.md` imports or points to `AGENTS.md`. Do not copy the Skill body into either adapter.
 
-Codex discovers repository skills under `.agents/skills`; Claude discovers them under `.claude/skills`. Both support symlinked Skill directories. The dual link prevents client-specific copies from drifting while leaving the Skill out of product CI and release artifacts.
+Client discovery locations and symlink support are client-version capabilities, not universal project facts. Verify them before selecting `project_symlink`. Set `PROJECT_GUARDRAILS_SKILL_DIR` to the selected reviewed checkout for framework commands. A dual link is one deployment adapter, not a requirement of the generic Skill.
 
 ## Moving Skill and evidence freshness
 
@@ -31,24 +37,24 @@ Development task claims may use a clean, bound, unsigned revision. `commercial_r
 
 ## Evidence retention
 
-The project ledger is append-only and permanent within a 1 GiB repository-specific budget. Outputs are redacted before persistence and content-addressed by SHA-256. Retention actions may compact duplicate output blobs, but must never rewrite ledger entries or discard the sealed chain head.
+Every project explicitly selects an evidence profile, retention class, active-plane byte budget, and sealing profile. `commercial` and `regulated` evidence requires permanent retention and external-signature-capable `sigstore_bundle` sealing. `open_source` and `custom` projects may select a looser reviewed policy. Outputs are redacted before persistence and content-addressed by SHA-256.
 
 When the active schema changes incompatibly:
 
 1. stop active writers and acquire the ledger lock;
-2. validate every hash chain and referenced artifact;
+2. validate every ledger hash chain, ledger-referenced immutable evidence artifact, manifest, registry, and traceability binding;
 3. package the ledger, traceability graph, manifest, registry, output inventory, and final chain heads;
 4. compute a package digest;
 5. sign that digest externally;
 6. store the archive and verification bundle read-only;
-7. initialize a new active plane with an explicit predecessor archive digest;
+7. initialize a new active plane with `--predecessor-archive-id`, which verifies and records the predecessor archive digest;
 8. do not ship a compatibility reader in the new evaluator.
 
-If the 1 GiB cap would be exceeded, block evidence-producing controls before execution unless a reviewed compaction or archive rotation plan preserves all ledger entries, content digests, and signature verification material.
+The byte budget applies only to the active control plane; immutable archives are measured and governed separately. If the active cap would be exceeded, block evidence-producing controls until a reviewed compaction or rotation preserves ledger entries, content digests, and signature material.
 
 ## External signing profile
 
-The preferred portable design is a Sigstore blob signature over the sealed archive or canonical archive manifest:
+For projects that selected `sigstore_bundle`, the portable design is a Sigstore blob signature over the canonical archive manifest:
 
 ```bash
 cosign sign-blob archive-manifest.json --bundle archive-manifest.sigstore.json
@@ -58,7 +64,7 @@ cosign verify-blob archive-manifest.json \
   --certificate-oidc-issuer <trusted-issuer>
 ```
 
-The bundle preserves the signature, signing certificate, and transparency-log verification material. A commercial/release claim must additionally validate the expected identity and issuer; cryptographic validity alone is insufficient. Remote signing, key use, paid services, and publication remain explicit-authorization capabilities.
+Store the bundle beside the read-only archive, not inside it. A project release control must validate the expected identity and issuer; cryptographic validity alone is insufficient. Remote signing, key use, paid services, and publication remain explicit-authorization capabilities.
 
 Primary references:
 

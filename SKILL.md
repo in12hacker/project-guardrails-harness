@@ -26,8 +26,8 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Greenfield projects get the skeleton before feature development. Brownfield projects remain globally `not_ready` until debt is eliminated, but verified convergence tasks may complete.
 
    ```bash
-   SKILL_DIR=".agents/skills/project-guardrails-harness"
-   [ -f "$SKILL_DIR/scripts/init_quality_framework.py" ] || SKILL_DIR=".claude/skills/project-guardrails-harness"
+   : "${PROJECT_GUARDRAILS_SKILL_DIR:?set the reviewed Skill checkout path}"
+   SKILL_DIR="$PROJECT_GUARDRAILS_SKILL_DIR"
    python3 "$SKILL_DIR/scripts/init_quality_framework.py" --root . \
      --development-mode <explicit> --target-maturity <explicit> \
      --product-type <explicit> --distribution-model <explicit> \
@@ -36,6 +36,10 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      --support-model <explicit> --primary-user <explicit> \
      --public-contract <explicit> --build-topology <explicit> \
      --persistent-state <explicit> --external-contributions <explicit> \
+     --skill-deployment <explicit> \
+     --evidence-profile <explicit> --evidence-retention <explicit> \
+     --evidence-max-active-bytes <explicit> \
+     --evidence-sealing-profile <explicit> \
      --no-ai-system --scope-mode <explicit> \
      --legal-profile <explicit>
    ```
@@ -108,14 +112,14 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Feed incidents, escaped defects, SLO breaches, customer outcomes, vulnerability response, and repeated review findings back into project controls and durable memory.
    - Record external-project observations with immutable revision, evidence paths, profile, applicability boundary, and counterexamples.
    - Promote portable lessons only after independent corroboration or a stable formal standard, explicit target applicability, owner review, runnable verification, and false-positive tests.
-   - Keep `.guardrails` project-owned and versioned. Keep only the shared Skill as local symlinks in `.agents/skills` and `.claude/skills`; do not commit the links.
-   - When the active schema changes incompatibly, seal the old ledger as a read-only signed archive and regenerate the active plane. Do not add compatibility readers.
+   - Keep `.guardrails` project-owned and versioned. Select `environment_managed`, `project_symlink`, or `vendored` Skill deployment explicitly. For `project_symlink`, keep client-specific links uncommitted and point every client to the same reviewed checkout.
+   - When the active schema changes incompatibly, seal the old control plane as a read-only digest archive, add the external signature when its profile requires one, and regenerate the active plane. Do not add compatibility readers.
 
    ```bash
    python3 "$SKILL_DIR/scripts/seal_evidence.py" --root . --archive-id <immutable-id>
    ```
 
-   Use `--legacy-unvalidated` only for a pre-current-schema ledger; the archive is then permanently marked untrusted and cannot support a claim.
+   Use `--legacy-unvalidated` only for a pre-current-schema control plane; the archive is then permanently marked untrusted and cannot support a claim. When regenerating, pass `--predecessor-archive-id <immutable-id>` so the new manifest binds the prior archive digest.
 
 ## Output Shape
 

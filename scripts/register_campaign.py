@@ -10,6 +10,7 @@ from pathlib import Path
 
 from quality_common import (
     canonical_digest,
+    exclusive_file_lock,
     framework_binding,
     git_commit,
     git_workspace_digest,
@@ -38,6 +39,18 @@ def main() -> int:
         print("FAIL [QF-CAMPAIGN]: --guardrails-dir must be project-relative", file=sys.stderr)
         return 2
     guardrails = root / args.guardrails_dir
+    try:
+        with exclusive_file_lock(guardrails / ".ledger.lock"):
+            return locked_main(args, root, guardrails)
+    except (OSError, TimeoutError) as exc:
+        print(f"BLOCKED [QF-ENVIRONMENT]: {exc}", file=sys.stderr)
+        return 1
+
+
+def locked_main(
+    args: argparse.Namespace, root: Path, guardrails: Path,
+) -> int:
+    """Register a campaign while excluding evaluators and evidence sealing."""
     try:
         manifest = load_json_yaml(guardrails / "quality-manifest.yaml")
         registry = load_json_yaml(guardrails / "control-registry.yaml")

@@ -27,6 +27,7 @@
     "build_topology": "REQUIRED",
     "persistent_state": "REQUIRED",
     "external_contributions": "REQUIRED",
+    "skill_deployment": "REQUIRED",
     "ai_system": false,
     "legal_profiles": ["REQUIRED"],
     "quality_dimensions": [
@@ -60,10 +61,12 @@
     ]
   },
   "evidence_policy": {
-    "retention": "permanent",
-    "max_bytes": 1073741824,
+    "profile": "REQUIRED",
+    "retention": "REQUIRED",
+    "max_active_bytes": 1073741824,
     "redact_outputs": true,
-    "sealing_profile": "sigstore_bundle"
+    "sealing_profile": "REQUIRED",
+    "predecessor_archive": null
   },
   "audit_policy": {
     "required_stages": ["self", "cross", "release_authority"],

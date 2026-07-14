@@ -8,7 +8,6 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -39,25 +38,24 @@ def quiet_command(command: list[str], timeout: int = 10) -> bool:
 
 
 def has_privilege() -> bool:
-    return (hasattr(os, "geteuid") and os.geteuid() == 0) or quiet_command(["sudo", "-n", "true"])
+    return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 def has_cap_bpf() -> bool:
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        return True
     try:
         status = Path("/proc/self/status").read_text(encoding="utf-8")
         cap_eff = next(line.split()[1] for line in status.splitlines() if line.startswith("CapEff:"))
         if int(cap_eff, 16) & (1 << 39):
             return True
     except (OSError, StopIteration, ValueError):
-        pass
-    return quiet_command(["sudo", "-n", "true"])
+        return False
+    return False
 
 
 def writable(path: Path) -> bool:
+    if not path.is_dir():
+        return False
     try:
-        path.mkdir(parents=True, exist_ok=True)
         descriptor, name = tempfile.mkstemp(prefix=".guardrails-preflight-", dir=path)
         os.close(descriptor)
         Path(name).unlink()
@@ -78,7 +76,18 @@ def browser() -> bool:
     if any(shutil.which(name) for name in ("chromium", "chromium-browser", "google-chrome")):
         return True
     cache = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", Path.home() / ".cache" / "ms-playwright"))
-    return cache.is_dir() and any(cache.iterdir())
+    if not cache.is_dir():
+        return False
+    candidates = (
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-linux64/chrome",
+        "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+    )
+    return any(
+        executable.is_file() and os.access(executable, os.X_OK)
+        for pattern in candidates
+        for executable in cache.glob(pattern)
+    )
 
 
 def parse_args() -> argparse.Namespace:

@@ -15,6 +15,8 @@ EVALUATE = ROOT / "scripts" / "evaluate_quality.py"
 SCAN = ROOT / "scripts" / "scan_project.py"
 SYNC = ROOT / "scripts" / "sync_traceability.py"
 REGISTER = ROOT / "scripts" / "register_campaign.py"
+SEAL = ROOT / "scripts" / "seal_evidence.py"
+PREFLIGHT = ROOT / "templates" / "preflight.py"
 
 
 class QualityFrameworkTest(unittest.TestCase):
@@ -61,6 +63,11 @@ class QualityFrameworkTest(unittest.TestCase):
                 "--build-topology", build_topology,
                 "--persistent-state", persistent_state,
                 "--external-contributions", external_contributions,
+                "--skill-deployment", "environment_managed",
+                "--evidence-profile", "open_source",
+                "--evidence-retention", "project_lifetime",
+                "--evidence-max-active-bytes", "1073741824",
+                "--evidence-sealing-profile", "sha256_chain",
                 "--ai-system" if ai_system else "--no-ai-system",
                 "--scope-mode", "full_repo",
                 "--legal-profile", "none_identified",
@@ -136,6 +143,14 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual("single_form", manifest["profile"]["build_topology"])
         self.assertEqual("none", manifest["profile"]["persistent_state"])
         self.assertEqual("accepted", manifest["profile"]["external_contributions"])
+        self.assertEqual("environment_managed", manifest["profile"]["skill_deployment"])
+        self.assertEqual("open_source", manifest["evidence_policy"]["profile"])
+        self.assertEqual(
+            "project_lifetime", manifest["evidence_policy"]["retention"]
+        )
+        self.assertEqual(
+            1073741824, manifest["evidence_policy"]["max_active_bytes"]
+        )
 
     def test_open_core_round_trips_through_v2_contract(self) -> None:
         project = self.make_project(distribution_model="open_core")
@@ -978,6 +993,370 @@ class QualityFrameworkTest(unittest.TestCase):
         paths = {item["path"] for item in json.loads(output.read_text())["instruction_files"]}
         self.assertIn("AGENTS.md", paths)
         self.assertNotIn("CLAUDE.local.md", paths)
+
+    def test_seal_rejects_archive_id_path_escape(self) -> None:
+        project = self.make_project()
+        result = subprocess.run(
+            [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "../../escaped",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("cannot contain a path", result.stderr)
+        self.assertFalse((project / "escaped").exists())
+
+    def test_seal_rejects_symlink_without_mutating_target(self) -> None:
+        project = self.make_project()
+        external = Path(tempfile.mkdtemp(prefix="quality-seal-external-")) / "target.txt"
+        external.write_text("fixture\n", encoding="utf-8")
+        external.chmod(0o600)
+        evidence = project / ".guardrails" / "evidence"
+        evidence.mkdir()
+        (evidence / "external-link").symlink_to(external)
+
+        result = subprocess.run(
+            [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "linked",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, result.returncode)
+        self.assertIn("symbolic link", result.stderr)
+        self.assertEqual(0o600, external.stat().st_mode & 0o777)
+        self.assertFalse((project / ".guardrails" / "archive" / "linked").exists())
+
+    def test_seal_validates_the_entire_control_plane(self) -> None:
+        project = self.make_project()
+        names = (
+            "quality-manifest.yaml", "control-registry.yaml",
+            "traceability-graph.json", "evidence-ledger.json",
+        )
+        for index, name in enumerate(names):
+            with self.subTest(name=name):
+                path = project / ".guardrails" / name
+                original = path.read_text()
+                path.write_text("{}\n", encoding="utf-8")
+                archive_id = f"invalid-plane-{index}"
+                result = subprocess.run(
+                    [
+                        sys.executable, str(SEAL), "--root", str(project),
+                        "--archive-id", archive_id,
+                    ],
+                    check=False, capture_output=True, text=True,
+                )
+                path.write_text(original, encoding="utf-8")
+                self.assertEqual(1, result.returncode)
+                self.assertIn("invalid active control plane", result.stderr)
+                self.assertFalse(
+                    (project / ".guardrails" / "archive" / archive_id).exists()
+                )
+
+    def test_valid_seal_records_active_policy_and_digest(self) -> None:
+        project = self.make_project()
+        result = subprocess.run(
+            [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "revision-1",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        archive_manifest = json.loads(
+            (
+                project / ".guardrails" / "archive" / "revision-1"
+                / "archive-manifest.json"
+            ).read_text()
+        )
+        self.assertEqual("validated", archive_manifest["validation_status"])
+        self.assertEqual("sha256_chain", archive_manifest["sealing_profile"])
+        self.assertEqual("digest_only", archive_manifest["signature_status"])
+        self.assertEqual(64, len(archive_manifest["archive_sha256"]))
+        self.assertEqual(
+            {"runs": "GENESIS", "audits": "GENESIS", "claims": "GENESIS"},
+            archive_manifest["ledger_chain_heads"],
+        )
+
+    def test_seal_packages_immutable_artifacts_and_rejects_tampered_evidence(self) -> None:
+        project = self.make_project({".gitignore": "build/\n"})
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        control = registry["controls"][0]
+        control["execution"] = {
+            "type": "command",
+            "command": [
+                sys.executable, "-c",
+                "from pathlib import Path; p=Path('build/report.txt'); "
+                "p.parent.mkdir(exist_ok=True); p.write_text('current')",
+            ],
+            "cwd": ".", "timeout_seconds": 10, "authorization_required": False,
+            "artifact_paths": ["build/report.txt"],
+        }
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, sync.returncode, sync.stderr)
+        run = self.run_evaluator(
+            project, "--run", "--audit-stage", "self",
+            "--actor", "fixture-self", "--control", control["id"],
+        )
+        self.assertEqual(0, run.returncode, run.stderr)
+        sealed = subprocess.run(
+            [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "with-artifact",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, sealed.returncode, sealed.stderr)
+        archive_manifest = json.loads(
+            (
+                project / ".guardrails" / "archive" / "with-artifact"
+                / "archive-manifest.json"
+            ).read_text()
+        )
+        archived_artifact = archive_manifest["referenced_artifacts"][0]
+        self.assertEqual("build/report.txt", archived_artifact["source_path"])
+        self.assertEqual(
+            "current",
+            (
+                project / ".guardrails" / "archive" / "with-artifact"
+                / archived_artifact["archive_path"]
+            ).read_text(),
+        )
+
+        ledger = json.loads(
+            (project / ".guardrails" / "evidence-ledger.json").read_text()
+        )
+        artifact_evidence = ledger["runs"][-1]["results"][0]["artifacts"][0]
+        self.assertEqual(
+            Path(artifact_evidence["evidence_ref"]).relative_to(".guardrails").as_posix(),
+            archived_artifact["archive_path"],
+        )
+
+        (project / "build" / "report.txt").write_text("changed")
+        evolved = subprocess.run(
+            [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "evolved-source",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, evolved.returncode, evolved.stderr)
+
+        immutable = project / artifact_evidence["evidence_ref"]
+        immutable.write_text("tampered\n", encoding="utf-8")
+        tampered = subprocess.run(
+            [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "tampered-evidence",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, tampered.returncode)
+        self.assertIn("immutable evidence digest mismatch", tampered.stderr)
+
+    def test_predecessor_binding_revalidates_archived_file_digests(self) -> None:
+        project = self.make_project()
+        result = subprocess.run(
+            [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "revision-1",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        probe = (
+            "import json,sys; from pathlib import Path; "
+            f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
+            "from init_quality_framework import predecessor_archive_binding; "
+            "print(json.dumps(predecessor_archive_binding(Path(sys.argv[1]), sys.argv[2])))"
+        )
+        valid = subprocess.run(
+            [sys.executable, "-c", probe, str(project / ".guardrails"), "revision-1"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, valid.returncode, valid.stderr)
+        self.assertEqual("revision-1", json.loads(valid.stdout)["archive_id"])
+
+        archive_manifest = json.loads(
+            (
+                project / ".guardrails" / "archive" / "revision-1"
+                / "archive-manifest.json"
+            ).read_text()
+        )
+        archived_file = (
+            project / ".guardrails" / "archive" / "revision-1"
+            / archive_manifest["files"][0]["path"]
+        )
+        archived_file.chmod(0o600)
+        archived_file.write_text("tampered\n", encoding="utf-8")
+        invalid = subprocess.run(
+            [sys.executable, "-c", probe, str(project / ".guardrails"), "revision-1"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertNotEqual(0, invalid.returncode)
+        self.assertIn("digest mismatch", invalid.stderr)
+
+    def test_reinitialization_binds_predecessor_and_resets_active_evidence(self) -> None:
+        project = self.make_project()
+        evidence = project / ".guardrails" / "evidence"
+        evidence.mkdir()
+        (evidence / "stale.log").write_text("old evidence\n", encoding="utf-8")
+        sealed = subprocess.run(
+            [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "revision-1",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, sealed.returncode, sealed.stderr)
+        regenerated = subprocess.run(
+            [
+                sys.executable, str(INIT), "--root", str(project),
+                "--development-mode", "human_brownfield",
+                "--target-maturity", "prototype",
+                "--product-type", "cli",
+                "--distribution-model", "open_source",
+                "--market", "global_unspecified",
+                "--criticality", "low",
+                "--data-sensitivity", "public",
+                "--deployment-model", "local",
+                "--support-model", "community",
+                "--primary-user", "developer",
+                "--public-contract", "none",
+                "--build-topology", "single_form",
+                "--persistent-state", "none",
+                "--external-contributions", "accepted",
+                "--skill-deployment", "environment_managed",
+                "--evidence-profile", "open_source",
+                "--evidence-retention", "project_lifetime",
+                "--evidence-max-active-bytes", "1073741824",
+                "--evidence-sealing-profile", "sha256_chain",
+                "--no-ai-system", "--scope-mode", "full_repo",
+                "--legal-profile", "none_identified",
+                "--predecessor-archive-id", "revision-1", "--force",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, regenerated.returncode, regenerated.stderr)
+        self.assertFalse(evidence.exists())
+        self.assertTrue(
+            (
+                project / ".guardrails" / "archive" / "revision-1"
+                / "archive-manifest.json"
+            ).is_file()
+        )
+        manifest = json.loads(
+            (project / ".guardrails" / "quality-manifest.yaml").read_text()
+        )
+        predecessor = manifest["evidence_policy"]["predecessor_archive"]
+        self.assertEqual("revision-1", predecessor["archive_id"])
+        self.assertEqual(64, len(predecessor["archive_sha256"]))
+
+    def test_archive_history_is_excluded_from_active_evidence_budget(self) -> None:
+        project = self.make_project()
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["evidence_policy"]["max_active_bytes"] = 8 * 1024 * 1024
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        archived = project / ".guardrails" / "archive" / "old" / "payload.bin"
+        archived.parent.mkdir(parents=True)
+        with archived.open("wb") as stream:
+            stream.truncate(32 * 1024 * 1024)
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        result = self.run_evaluator(project, "--run", "--control", control_id)
+        self.assertNotIn("QF-EVIDENCE", result.stderr)
+
+    def test_artifact_persistence_cannot_overrun_active_evidence_budget(self) -> None:
+        project = self.make_project({".gitignore": "build/\n"})
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["evidence_policy"]["max_active_bytes"] = 4 * 1024 * 1024
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        control = registry["controls"][0]
+        control["execution"] = {
+            "type": "command",
+            "command": [
+                sys.executable, "-c",
+                "from pathlib import Path; p=Path('build/large.bin'); "
+                "p.parent.mkdir(exist_ok=True); f=p.open('wb'); "
+                "f.seek(8*1024*1024-1); f.write(b'0'); f.close()",
+            ],
+            "cwd": ".", "timeout_seconds": 10, "authorization_required": False,
+            "artifact_paths": ["build/large.bin"],
+        }
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, sync.returncode, sync.stderr)
+        result = self.run_evaluator(project, "--run", "--control", control["id"])
+        self.assertEqual(1, result.returncode)
+        ledger = json.loads(
+            (project / ".guardrails" / "evidence-ledger.json").read_text()
+        )
+        control_result = ledger["runs"][-1]["results"][0]
+        self.assertEqual("BLOCKED", control_result["status"])
+        self.assertEqual("evidence", control_result["blocker_kind"])
+        self.assertIn("exceeds active evidence budget", control_result["detail"])
+
+    def test_writable_preflight_does_not_create_missing_directory(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="quality-preflight-test-"))
+        missing = root / "missing" / "nested"
+        result = subprocess.run(
+            [sys.executable, str(PREFLIGHT), "writable", str(missing)],
+            check=False,
+        )
+        self.assertEqual(1, result.returncode)
+        self.assertFalse(missing.exists())
+
+    def test_framework_dirty_ignores_non_normative_untracked_files(self) -> None:
+        skill = Path(tempfile.mkdtemp(prefix="quality-skill-binding-test-"))
+        (skill / "scripts").mkdir()
+        (skill / "SKILL.md").write_text("# Fixture\n", encoding="utf-8")
+        script = skill / "scripts" / "fixture.py"
+        script.write_text("VALUE = 1\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=skill, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.invalid"],
+            cwd=skill, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Fixture"], cwd=skill, check=True,
+        )
+        subprocess.run(["git", "add", "."], cwd=skill, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=skill, check=True)
+
+        probe = (
+            "import json,sys; from pathlib import Path; "
+            f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
+            "from quality_common import framework_binding; "
+            "print(json.dumps(framework_binding(Path(sys.argv[1]))))"
+        )
+        (skill / "notes.tmp").write_text("untracked\n", encoding="utf-8")
+        clean = subprocess.run(
+            [sys.executable, "-c", probe, str(skill)],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertFalse(json.loads(clean.stdout)["dirty"])
+
+        script.write_text("VALUE = 2\n", encoding="utf-8")
+        dirty = subprocess.run(
+            [sys.executable, "-c", probe, str(skill)],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertTrue(json.loads(dirty.stdout)["dirty"])
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@
     },
     "profile": {
       "type": "object",
-      "required": ["product_types", "distribution_model", "target_markets", "criticality", "data_sensitivity", "deployment_models", "support_model", "primary_users", "public_contracts", "build_topology", "persistent_state", "external_contributions", "ai_system", "legal_profiles"],
+      "required": ["product_types", "distribution_model", "target_markets", "criticality", "data_sensitivity", "deployment_models", "support_model", "primary_users", "public_contracts", "build_topology", "persistent_state", "external_contributions", "skill_deployment", "ai_system", "legal_profiles"],
       "properties": {
         "product_types": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "distribution_model": {
@@ -62,6 +62,7 @@
         "build_topology": {"enum": ["single_form", "multi_form", "cross_target"]},
         "persistent_state": {"enum": ["none", "database", "indexed_store", "on_disk_format", "client_state", "mixed"]},
         "external_contributions": {"enum": ["accepted", "restricted", "closed"]},
+        "skill_deployment": {"enum": ["environment_managed", "project_symlink", "vendored"]},
         "ai_system": {"type": "boolean"},
         "legal_profiles": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "quality_dimensions": {"type": "array", "minItems": 1, "items": {"type": "string"}}
@@ -94,13 +95,36 @@
     },
     "evidence_policy": {
       "type": "object",
-      "required": ["retention", "max_bytes", "redact_outputs", "sealing_profile"],
+      "required": ["profile", "retention", "max_active_bytes", "redact_outputs", "sealing_profile", "predecessor_archive"],
       "properties": {
-        "retention": {"const": "permanent"},
-        "max_bytes": {"type": "integer", "minimum": 1048576},
+        "profile": {"enum": ["open_source", "commercial", "regulated", "custom"]},
+        "retention": {"enum": ["project_lifetime", "release_lifetime", "permanent"]},
+        "max_active_bytes": {"type": "integer", "minimum": 1048576},
         "redact_outputs": {"const": true},
-        "sealing_profile": {"enum": ["sha256_chain", "sigstore_bundle"]}
+        "sealing_profile": {"enum": ["sha256_chain", "sigstore_bundle"]},
+        "predecessor_archive": {
+          "type": ["object", "null"],
+          "required": ["archive_id", "archive_sha256", "validation_status", "signature_status"],
+          "properties": {
+            "archive_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+            "archive_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+            "validation_status": {"enum": ["validated", "legacy_unvalidated"]},
+            "signature_status": {"enum": ["digest_only", "pending_external_signature", "verified_external_signature", "untrusted"]}
+          },
+          "additionalProperties": false
+        }
       },
+      "allOf": [
+        {
+          "if": {"properties": {"profile": {"enum": ["commercial", "regulated"]}}},
+          "then": {
+            "properties": {
+              "retention": {"const": "permanent"},
+              "sealing_profile": {"const": "sigstore_bundle"}
+            }
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "audit_policy": {

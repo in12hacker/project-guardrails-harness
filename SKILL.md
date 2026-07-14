@@ -111,6 +111,12 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Keep `.guardrails` project-owned and versioned. Keep only the shared Skill as local symlinks in `.agents/skills` and `.claude/skills`; do not commit the links.
    - When the active schema changes incompatibly, seal the old ledger as a read-only signed archive and regenerate the active plane. Do not add compatibility readers.
 
+   ```bash
+   python3 "$SKILL_DIR/scripts/seal_evidence.py" --root . --archive-id <immutable-id>
+   ```
+
+   Use `--legacy-unvalidated` only for a pre-current-schema ledger; the archive is then permanently marked untrusted and cannot support a claim.
+
 ## Output Shape
 
 Emit a **progressive-disclosure directory**, not one monolithic file. The three

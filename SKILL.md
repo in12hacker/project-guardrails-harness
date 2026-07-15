@@ -110,10 +110,36 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 
    Before handing work to another role, derive the four non-mutating readiness
    levels. A readiness report is not a claim and never writes the ledger.
+   Human projects select affected controls explicitly:
 
    ```bash
    python3 "$SKILL_DIR/scripts/assess_readiness.py" --root . \
      --control <affected-id> --require-level TASK_CLAIM_READY
+   ```
+
+   AI brownfield projects must provide the complete reviewed task context. Do
+   not infer a task from the active campaign because one phase may contain
+   multiple tasks. Missing or mismatched context returns `NOT_EVALUATED` with
+   typed `blocker_details`.
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/assess_readiness.py" --root . \
+     --campaign-id <id> --campaign-revision <n> \
+     --phase-id <phase> --task-id <task> \
+     --require-level TASK_CLAIM_READY
+   ```
+
+   Generate the machine-owned handoff header under the evidence plane, then
+   lint it immediately before transfer. Human notes cannot redefine campaign,
+   scope, controls, readiness, subject, Skill, or authorization fields.
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/render_task_handoff.py" --root . \
+     --campaign-id <id> --campaign-revision <n> \
+     --phase-id <phase> --task-id <task> --write
+   python3 "$SKILL_DIR/scripts/render_task_handoff.py" --root . \
+     --campaign-id <id> --campaign-revision <n> \
+     --phase-id <phase> --task-id <task> --check
    ```
 
 10. **Learn and evolve**
@@ -150,6 +176,8 @@ and never overrides them. Use the initializer in step 3 to scaffold the set.
 ├── control-registry.yaml   # applicable controls, owners, execution and evidence requirements
 ├── evidence-ledger.json    # subject-bound evidence + separate storage-chain bindings
 ├── traceability-graph.json # derived requirement → risk → control → test → evidence graph
+├── evidence/
+│   └── task-handoff.md     # generated task context/readiness header + human implementation notes
 ├── INDEX.md          # ALWAYS loaded: one-line profile, owner summary, hard-gate shortlist, links (keep <150 lines)
 ├── profile.md        # evidence: README excerpt + deps + build targets + existing rules
 ├── owners.md         # owner map (semantic owners vs adapters)

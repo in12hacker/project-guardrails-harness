@@ -20,6 +20,8 @@ SYNC = ROOT / "scripts" / "sync_traceability.py"
 REGISTER = ROOT / "scripts" / "register_campaign.py"
 REVIEW_UPDATE = ROOT / "scripts" / "review_skill_update.py"
 READINESS = ROOT / "scripts" / "assess_readiness.py"
+HARNESS_CANDIDATE = ROOT / "scripts" / "validate_harness_candidate.py"
+HANDOFF = ROOT / "scripts" / "render_task_handoff.py"
 SEAL = ROOT / "scripts" / "seal_evidence.py"
 PREFLIGHT = ROOT / "templates" / "preflight.py"
 
@@ -489,6 +491,86 @@ class QualityFrameworkTest(unittest.TestCase):
                 "registry drift requires a campaign revision",
                 levels[level]["blockers"],
             )
+
+    def test_ai_brownfield_readiness_requires_exact_typed_task_context(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        exit_policy = {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 0,
+            "allow_open_cleanup_debt": True,
+        }
+        registered = self.register_campaign(project, {
+            "id": "CONTEXT-CAMPAIGN", "revision": 7,
+            "target_maturity": "prototype", "assessed_scope": ["."],
+            "owner": "quality",
+            "phases": [{
+                "id": "PHASE-1", "title": "Context fixture",
+                "affected_control_ids": [control_id], "assessed_scope": ["."],
+                "exit_policy": exit_policy,
+                "tasks": [
+                    {
+                        "id": task_id, "kind": "framework_adoption",
+                        "affected_control_ids": [control_id], "assessed_scope": ["."],
+                        "exit_policy": exit_policy,
+                    }
+                    for task_id in ("TASK-1", "TASK-2")
+                ],
+            }],
+        })
+        self.assertEqual(0, registered.returncode, registered.stderr)
+
+        def assess(*context: str) -> dict:
+            result = subprocess.run(
+                [sys.executable, str(READINESS), "--root", str(project), *context],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            return json.loads(result.stdout)
+
+        complete = assess(
+            "--campaign-id", "CONTEXT-CAMPAIGN", "--campaign-revision", "7",
+            "--phase-id", "PHASE-1", "--task-id", "TASK-2",
+        )
+        self.assertEqual("1.1", complete["schema_version"])
+        task_level = complete["levels"]["TASK_CLAIM_READY"]
+        self.assertEqual("BLOCKED", task_level["status"])
+        self.assertEqual([control_id], task_level["control_ids"])
+        self.assertTrue(task_level["blocker_details"])
+
+        wrong_revision = assess(
+            "--campaign-id", "CONTEXT-CAMPAIGN", "--campaign-revision", "6",
+            "--phase-id", "PHASE-1", "--task-id", "TASK-1",
+        )["levels"]["TASK_CLAIM_READY"]
+        self.assertEqual("NOT_EVALUATED", wrong_revision["status"])
+        self.assertEqual(
+            "CAMPAIGN_REVISION_MISMATCH",
+            wrong_revision["blocker_details"][0]["code"],
+        )
+
+        missing_phase_task = assess(
+            "--campaign-id", "CONTEXT-CAMPAIGN", "--campaign-revision", "7",
+        )["levels"]["TASK_CLAIM_READY"]
+        self.assertEqual("TASK_CONTEXT_MISSING", missing_phase_task["blocker_details"][0]["code"])
+        self.assertEqual(
+            ["phase_id", "task_id"],
+            missing_phase_task["blocker_details"][0]["missing_fields"],
+        )
+
+        missing_task = assess(
+            "--campaign-id", "CONTEXT-CAMPAIGN", "--campaign-revision", "7",
+            "--phase-id", "PHASE-1",
+        )["levels"]["TASK_CLAIM_READY"]
+        self.assertEqual(["task_id"], missing_task["blocker_details"][0]["missing_fields"])
+
+        unknown_task = assess(
+            "--campaign-id", "CONTEXT-CAMPAIGN", "--campaign-revision", "7",
+            "--phase-id", "PHASE-1", "--task-id", "TASK-UNKNOWN",
+        )["levels"]["TASK_CLAIM_READY"]
+        self.assertEqual("CAMPAIGN_TASK_UNKNOWN", unknown_task["blocker_details"][0]["code"])
 
     def test_unconfirmed_applies_false_is_a_framework_error(self) -> None:
         project = self.make_project()
@@ -1336,6 +1418,25 @@ class QualityFrameworkTest(unittest.TestCase):
         updated = json.loads(manifest_path.read_text())
         self.assertNotEqual("0" * 64, updated["framework"]["content_sha256"])
 
+    def test_default_update_declaration_treats_reviewed_docs_as_control_logic(self) -> None:
+        project = self.make_project()
+        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["framework"]["content_sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        checked = subprocess.run(
+            [sys.executable, str(REVIEW_UPDATE), "--root", str(project), "--check"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, checked.returncode, checked.stderr)
+        report = json.loads(checked.stdout)
+        self.assertEqual("update_available", report["status"])
+        self.assertEqual("control_logic", report["change_class"])
+        self.assertEqual("control_logic", report["path_change_class"])
+        self.assertTrue(report["compatible"])
+        self.assertFalse(report["requires_seal"])
+        self.assertTrue(report["rerun_control_ids"])
+
     def test_skill_update_refuses_incompatible_schema_without_mutation(self) -> None:
         project = self.make_project()
         manifest_path = project / ".guardrails" / "quality-manifest.yaml"
@@ -1446,6 +1547,101 @@ class QualityFrameworkTest(unittest.TestCase):
             path: path.read_bytes() for path in guardrails.rglob("*") if path.is_file()
         })
 
+    def test_generated_task_handoff_is_deterministic_and_stale_on_campaign_revision(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        exit_policy = {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 0,
+            "allow_open_cleanup_debt": True,
+        }
+
+        def campaign(revision: int) -> dict:
+            return {
+                "id": "HANDOFF-CAMPAIGN", "revision": revision,
+                "target_maturity": "prototype", "assessed_scope": ["."],
+                "owner": "quality",
+                "phases": [{
+                    "id": "PHASE-1", "title": "Portable handoff",
+                    "affected_control_ids": [control_id], "assessed_scope": ["."],
+                    "exit_policy": exit_policy,
+                    "tasks": [{
+                        "id": "TASK-1", "kind": "framework_adoption",
+                        "affected_control_ids": [control_id],
+                        "assessed_scope": ["src", "tests"],
+                        "exit_policy": exit_policy,
+                    }],
+                }],
+            }
+
+        registered = self.register_campaign(project, campaign(1))
+        self.assertEqual(0, registered.returncode, registered.stderr)
+        context = [
+            "--campaign-id", "HANDOFF-CAMPAIGN", "--campaign-revision", "1",
+            "--phase-id", "PHASE-1", "--task-id", "TASK-1",
+        ]
+        rendered = subprocess.run(
+            [sys.executable, str(HANDOFF), "--root", str(project), *context, "--write"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stdout + rendered.stderr)
+        handoff = project / ".guardrails" / "evidence" / "task-handoff.md"
+        first = handoff.read_bytes()
+        text = first.decode()
+        payload = json.loads(text.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(1, payload["campaign"]["revision"])
+        self.assertEqual("TASK-1", payload["campaign"]["task_id"])
+        self.assertEqual([control_id], payload["affected_control_ids"])
+        self.assertEqual(["src", "tests"], payload["assessed_scope"])
+        self.assertIn("TASK_CLAIM_READY", payload["readiness"])
+        self.assertTrue(payload["action_policy"]["machine_fields_are_authoritative"])
+
+        rerendered = subprocess.run(
+            [sys.executable, str(HANDOFF), "--root", str(project), *context, "--write"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, rerendered.returncode, rerendered.stdout + rerendered.stderr)
+        self.assertEqual(first, handoff.read_bytes())
+        current = subprocess.run(
+            [sys.executable, str(HANDOFF), "--root", str(project), *context, "--check"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, current.returncode, current.stdout + current.stderr)
+
+        clean_text = handoff.read_text()
+        handoff.write_text(clean_text + "\ncampaign_revision: 99\n")
+        override = subprocess.run(
+            [sys.executable, str(HANDOFF), "--root", str(project), *context, "--check"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, override.returncode)
+        self.assertEqual("MANUAL_OVERRIDE_REJECTED", json.loads(override.stdout)["status"])
+        handoff.write_text(clean_text)
+
+        replacement_path = project.parent / f"{project.name}-campaign-v2.json"
+        replacement_path.write_text(json.dumps(campaign(2), indent=2) + "\n")
+        replaced = subprocess.run(
+            [
+                sys.executable, str(REGISTER), "--root", str(project),
+                "--campaign", str(replacement_path), "--replace-active",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, replaced.returncode, replaced.stderr)
+        revision_two = [
+            "--campaign-id", "HANDOFF-CAMPAIGN", "--campaign-revision", "2",
+            "--phase-id", "PHASE-1", "--task-id", "TASK-1",
+        ]
+        stale = subprocess.run(
+            [sys.executable, str(HANDOFF), "--root", str(project), *revision_two, "--check"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, stale.returncode, stale.stdout + stale.stderr)
+        self.assertEqual("STALE_HANDOFF", json.loads(stale.stdout)["status"])
+
     def test_evidence_uses_project_relative_paths(self) -> None:
         project = self.make_project()
         registry = json.loads(
@@ -1549,6 +1745,125 @@ class QualityFrameworkTest(unittest.TestCase):
                 )
         self.assertEqual("old-a.txt\n", (target / "a.txt").read_text())
         self.assertEqual("old-b.txt\n", (target / "b.txt").read_text())
+
+    def test_portable_execution_harness_candidate_accepts_only_closed_runtime_chain(self) -> None:
+        digest = "a" * 64
+        kinds = (
+            "capability_preflight", "target_context_readiness", "effect",
+            "product_assertion", "cleanup",
+        )
+        phases = {
+            "capability_preflight": "pre_effect",
+            "target_context_readiness": "pre_effect",
+            "effect": "effect",
+            "product_assertion": "post_effect",
+            "cleanup": "post_effect",
+        }
+        vantage = {
+            "capability_preflight": "container",
+            "target_context_readiness": "container",
+            "effect": "container",
+            "product_assertion": "browser",
+            "cleanup": "container",
+        }
+        artifacts = [f"evidence/{kind}.json" for kind in kinds]
+        candidate = {
+            "candidate_version": "1.0",
+            "candidate_status": "proposal",
+            "owner_review": {"status": "pending", "owner": "quality", "reviewed_at": None},
+            "compatibility": {
+                "evidence_ledger_schema_change": False,
+                "ledger_integration": "not_proposed",
+            },
+            "run": {
+                "run_id": "RUN-1", "subject_sha256": digest,
+                "authorization_id": "AUTH-1",
+            },
+            "entrypoint_closure": {
+                "entrypoint": "project-owned-entrypoint",
+                "preconditions": ["target is selected"],
+                "authorization_boundary": "before effect",
+                "effect_commit_point": "effect invocation",
+                "runtime_assertions": ["observable product outcome"],
+                "required_artifacts": artifacts,
+                "offline_verifier": "project-owned-offline-verifier",
+                "cleanup_owner": "runtime-owner",
+                "failure_path": "abort before effect or clean up after effect",
+                "static_evidence": ["entrypoint reaches runtime assertion in composition test"],
+            },
+            "acquisition": {
+                "target": "portable-target",
+                "required_vantage_points": vantage,
+                "authorization": {
+                    "authorization_id": "AUTH-1", "required": True, "granted": True,
+                },
+                "artifact_set": artifacts,
+            },
+            "observations": [
+                {
+                    "run_id": "RUN-1", "execution_state": "executed",
+                    "phase": phases[kind], "vantage_point": vantage[kind],
+                    "target": "portable-target", "command_digest": digest,
+                    "started_at": f"2026-07-15T00:00:{index * 2:02d}+00:00",
+                    "finished_at": f"2026-07-15T00:00:{index * 2 + 1:02d}+00:00",
+                    "result_digest": digest, "status": "PASS",
+                    "subject_sha256": digest, "authorization_id": "AUTH-1",
+                    "assertion_kind": kind, "artifact_ref": artifacts[index],
+                    "evidence_kind": "runtime",
+                }
+                for index, kind in enumerate(kinds)
+            ],
+        }
+        fixture = Path(tempfile.mkdtemp(prefix="harness-candidate-test-")) / "candidate.json"
+
+        def validate(value: dict) -> subprocess.CompletedProcess[str]:
+            fixture.write_text(json.dumps(value, indent=2) + "\n")
+            return subprocess.run(
+                [sys.executable, str(HARNESS_CANDIDATE), str(fixture)],
+                check=False, capture_output=True, text=True,
+            )
+
+        accepted = validate(candidate)
+        self.assertEqual(0, accepted.returncode, accepted.stdout + accepted.stderr)
+        self.assertEqual("CANDIDATE_VALID", json.loads(accepted.stdout)["status"])
+        self.assertNotIn("\"status\": \"PASS\"", accepted.stdout)
+
+        mutations = {
+            "not_executed": lambda value: value["observations"][2].update(
+                execution_state="not_executed",
+            ),
+            "wrong_vantage": lambda value: value["observations"][0].update(
+                vantage_point="host",
+            ),
+            "host_preflight_for_container_effect": lambda value: value["acquisition"][
+                "required_vantage_points"
+            ].update(capability_preflight="host"),
+            "wrong_order": lambda value: value["observations"][2].update(
+                started_at="2026-07-14T23:59:00+00:00",
+            ),
+            "run_mismatch": lambda value: value["observations"][3].update(run_id="RUN-OTHER"),
+            "subject_mismatch": lambda value: value["observations"][3].update(
+                subject_sha256="b" * 64,
+            ),
+            "authorization_mismatch": lambda value: value["observations"][2].update(
+                authorization_id="AUTH-OTHER",
+            ),
+            "static_is_not_runtime": lambda value: value["observations"][2].update(
+                evidence_kind="static_reachability",
+            ),
+            "cleanup_failed": lambda value: value["observations"][4].update(status="FAIL"),
+            "unknown_artifact": lambda value: value["acquisition"]["artifact_set"].append(
+                "evidence/unknown.json",
+            ),
+            "missing_preflight": lambda value: value["observations"].pop(0),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                rejected_candidate = json.loads(json.dumps(candidate))
+                mutate(rejected_candidate)
+                rejected = validate(rejected_candidate)
+                self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
+                self.assertEqual("CANDIDATE_REJECTED", json.loads(rejected.stdout)["status"])
 
     def test_seal_rejects_archive_id_path_escape(self) -> None:
         project = self.make_project()

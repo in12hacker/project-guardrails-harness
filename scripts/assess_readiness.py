@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from evaluate_quality import (
+    CampaignContextError,
     campaign_claim_context,
     outcome_blockers,
     policy_blockers,
@@ -34,6 +35,11 @@ READINESS_LEVELS = (
     "MERGE_READY",
     "RELEASE_READY",
 )
+READINESS_SCHEMA_VERSION = "1.1"
+
+
+def blocker_detail(code: str, message: str, category: str = "quality") -> dict:
+    return {"code": code, "category": category, "message": message}
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,16 +55,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def blocked(blockers: list[str], controls: set[str] | None = None) -> dict:
+def blocked(
+    blockers: list[str], controls: set[str] | None = None,
+    details: list[dict] | None = None,
+) -> dict:
     return {
         "status": "BLOCKED",
         "control_ids": sorted(controls or set()),
         "blockers": sorted(set(blockers)),
+        "blocker_details": details or [
+            blocker_detail("QUALITY_BLOCKER", message) for message in sorted(set(blockers))
+        ],
     }
 
 
-def not_evaluated(reason: str) -> dict:
-    return {"status": "NOT_EVALUATED", "control_ids": [], "blockers": [reason]}
+def not_evaluated(detail: dict) -> dict:
+    return {
+        "status": "NOT_EVALUATED",
+        "control_ids": [],
+        "blockers": [detail["message"]],
+        "blocker_details": [detail],
+    }
 
 
 def control_readiness(
@@ -110,20 +127,26 @@ def control_readiness(
         "status": "READY",
         "control_ids": sorted(control_ids),
         "blockers": [],
+        "blocker_details": [],
         "supporting_run_ids": supporting,
     }
 
 
 def task_context(
     args: argparse.Namespace, manifest: dict, controls_by_id: dict[str, dict],
-) -> tuple[list[dict], dict | None, str | None]:
+) -> tuple[list[dict], dict | None, dict | None]:
     mode = manifest["project"]["development_mode"]
     if mode != "ai_brownfield":
         if not args.control:
-            return [], None, "affected --control values are required"
+            message = "affected --control values are required"
+            return [], None, blocker_detail("TASK_CONTROLS_MISSING", message, "task_context")
         unknown = sorted(set(args.control) - set(controls_by_id))
         if unknown:
-            return [], None, f"unknown task controls: {', '.join(unknown)}"
+            message = f"unknown task controls: {', '.join(unknown)}"
+            return [], None, {
+                **blocker_detail("TASK_CONTROLS_UNKNOWN", message, "task_context"),
+                "unknown_control_ids": unknown,
+            }
         return [controls_by_id[item] for item in sorted(set(args.control))], None, None
     claim_args = argparse.Namespace(
         campaign_id=args.campaign_id,
@@ -134,15 +157,24 @@ def task_context(
     )
     try:
         _, task = campaign_claim_context(manifest, claim_args)
-    except ValueError as exc:
-        return [], None, str(exc)
+    except CampaignContextError as exc:
+        return [], None, exc.blocker_detail()
     assert task is not None
     registered = set(task["affected_control_ids"])
     if args.control and set(args.control) != registered:
-        return [], None, "selected controls do not match the registered campaign task"
+        message = "selected controls do not match the registered campaign task"
+        return [], None, {
+            **blocker_detail("TASK_CONTROLS_MISMATCH", message, "task_context"),
+            "expected_control_ids": sorted(registered),
+            "actual_control_ids": sorted(set(args.control)),
+        }
     unknown = sorted(registered - set(controls_by_id))
     if unknown:
-        return [], None, f"campaign controls are outside target maturity: {', '.join(unknown)}"
+        message = f"campaign controls are outside target maturity: {', '.join(unknown)}"
+        return [], None, {
+            **blocker_detail("TASK_CONTROLS_OUT_OF_MATURITY", message, "task_context"),
+            "unknown_control_ids": unknown,
+        }
     return [controls_by_id[item] for item in sorted(registered)], task["exit_policy"], None
 
 
@@ -190,7 +222,7 @@ def main() -> int:
             level: blocked([sample["message"] for sample in diagnostics["samples"]])
             for level in READINESS_LEVELS
         }
-        report = {"schema_version": "1.0", "subject_binding": subject, "levels": levels}
+        report = {"schema_version": READINESS_SCHEMA_VERSION, "subject_binding": subject, "levels": levels}
         print(json.dumps(report, indent=2, sort_keys=True))
         return 1
 
@@ -214,12 +246,19 @@ def main() -> int:
     development = (
         blocked(development_blockers)
         if development_blockers
-        else {"status": "READY", "control_ids": [], "blockers": []}
+        else {
+            "status": "READY", "control_ids": [], "blockers": [],
+            "blocker_details": [],
+        }
     )
     task_controls, exit_policy, task_error = task_context(args, manifest, controls_by_id)
     if task_error:
         task = not_evaluated(task_error)
-        merge = not_evaluated(f"task context unavailable: {task_error}")
+        merge_detail = {
+            **task_error,
+            "message": f"task context unavailable: {task_error['message']}",
+        }
+        merge = not_evaluated(merge_detail)
     elif campaign_errors:
         selected = {control["id"] for control in task_controls}
         task = blocked(campaign_errors, selected)
@@ -248,7 +287,7 @@ def main() -> int:
         "MERGE_READY": merge,
         "RELEASE_READY": release,
     }
-    report = {"schema_version": "1.0", "subject_binding": subject, "levels": levels}
+    report = {"schema_version": READINESS_SCHEMA_VERSION, "subject_binding": subject, "levels": levels}
     print(json.dumps(report, indent=2, sort_keys=True))
     if args.require_level:
         return 0 if levels[args.require_level]["status"] == "READY" else 1

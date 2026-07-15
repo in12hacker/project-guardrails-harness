@@ -554,22 +554,75 @@ def stage_results(
     return latest, authorities, contexts
 
 
+class CampaignContextError(ValueError):
+    """Typed campaign selection failure shared by claims and readiness."""
+
+    def __init__(self, code: str, message: str, **details: object) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
+    def blocker_detail(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "category": "task_context",
+            "message": str(self),
+            **self.details,
+        }
+
+
 def campaign_claim_context(manifest: dict, args: argparse.Namespace) -> tuple[dict, dict | None]:
     campaign = manifest["development_policy"].get("active_campaign")
     if not isinstance(campaign, dict):
-        raise ValueError("AI brownfield task/phase outcomes require an active campaign")
-    if args.campaign_id != campaign["id"] or args.campaign_revision != campaign["revision"]:
-        raise ValueError("claim campaign id/revision does not match the active campaign")
+        raise CampaignContextError(
+            "ACTIVE_CAMPAIGN_MISSING",
+            "AI brownfield task/phase outcomes require an active campaign",
+        )
+    required = ["campaign_id", "campaign_revision", "phase_id"]
+    if args.claim_scope == "task":
+        required.append("task_id")
+    missing = [field for field in required if getattr(args, field, None) is None]
+    if missing:
+        raise CampaignContextError(
+            "TASK_CONTEXT_MISSING",
+            f"claim context is missing required fields: {', '.join(missing)}",
+            missing_fields=missing,
+        )
+    if args.campaign_id != campaign["id"]:
+        raise CampaignContextError(
+            "CAMPAIGN_ID_MISMATCH",
+            "claim campaign id does not match the active campaign",
+            field="campaign_id", expected=campaign["id"], actual=args.campaign_id,
+        )
+    if args.campaign_revision != campaign["revision"]:
+        raise CampaignContextError(
+            "CAMPAIGN_REVISION_MISMATCH",
+            "claim campaign revision does not match the active campaign",
+            field="campaign_revision", expected=campaign["revision"],
+            actual=args.campaign_revision,
+        )
     phase = next((item for item in campaign["phases"] if item["id"] == args.phase_id), None)
     if phase is None:
-        raise ValueError("claim phase is not registered in the active campaign")
+        raise CampaignContextError(
+            "CAMPAIGN_PHASE_UNKNOWN",
+            "claim phase is not registered in the active campaign",
+            field="phase_id", actual=args.phase_id,
+        )
     if args.claim_scope == "phase":
         if args.task_id:
-            raise ValueError("phase claims cannot select a task")
+            raise CampaignContextError(
+                "PHASE_CONTEXT_HAS_TASK",
+                "phase claims cannot select a task",
+                field="task_id", actual=args.task_id,
+            )
         return phase, None
     task = next((item for item in phase["tasks"] if item["id"] == args.task_id), None)
     if task is None:
-        raise ValueError("claim task is not registered in the selected phase")
+        raise CampaignContextError(
+            "CAMPAIGN_TASK_UNKNOWN",
+            "claim task is not registered in the selected phase",
+            field="task_id", actual=args.task_id,
+        )
     return phase, task
 
 

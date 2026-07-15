@@ -149,3 +149,21 @@ automatic claim:
 
 Each level is `READY`, `BLOCKED`, or `NOT_EVALUATED` with control IDs, blockers,
 and supporting run IDs. A lower level never implies a higher level.
+
+AI brownfield task readiness requires explicit campaign ID, campaign revision,
+phase ID, and task ID. Missing or mismatched context is `NOT_EVALUATED` with a
+typed blocker; the evaluator never selects an active task implicitly.
+
+## Machine Task Handoff
+
+`render_task_handoff.py` derives a deterministic header from the active
+manifest, exact campaign task, registry, subject/Skill binding, readiness, and
+authorization policy. It writes under `.guardrails/evidence/` so persisting the
+derived handoff does not change the audited subject. The human section may add
+implementation details, but it cannot redefine reserved machine fields.
+
+The handoff requires the same complete task context as readiness. `--check`
+rejects a missing header, changed subject, campaign revision, phase/task,
+affected controls, scope, readiness, capability/authorization requirement, or
+manual reserved-field override. It does not claim task, merge, or release
+readiness; it only reports the current derived state.

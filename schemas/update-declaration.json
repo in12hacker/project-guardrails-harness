@@ -5,5 +5,5 @@
   "affected_control_ids": [
     "*"
   ],
-  "summary": "Makes Markdown heading federation selectors fence-aware without changing the v3 schema."
+  "summary": "Adds typed AI brownfield readiness context, portable execution Harness candidates, and deterministic task handoff linting without changing the v3 control plane schema."
 }

@@ -33,6 +33,12 @@ Every generated manifest records:
 
 Every run, audit, claim, and AI brownfield campaign baseline carries the reviewed Skill binding. Before an update, run `review_skill_update.py --check`. Compatible updates may be applied in place and report affected controls; incompatible schema or semantics require sealing with the old bound Skill and regeneration with the new one. No new evaluator reads the old active schema.
 
+Update classification uses both changed paths and the reviewed declaration.
+Actual schema files force `schema`; executable, template, Skill, and reference
+changes force at least `control_logic`. A path name alone cannot establish
+incompatible semantics, so the declaration must explicitly select
+`incompatible_semantics` when behavior cannot be preserved in place.
+
 The initializer generates two staged candidates, validates schema, uniqueness
 and traceability, compares canonical digests, and only then replaces the active
 file set under the ledger lock. The compatible updater also validates and

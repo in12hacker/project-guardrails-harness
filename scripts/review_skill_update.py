@@ -83,7 +83,7 @@ def inferred_change_class(paths: list[str] | None) -> str:
             return "schema"
         if path == "SKILL.md" or path.startswith("references/"):
             classification = max(
-                (classification, "incompatible_semantics"),
+                (classification, "control_logic"),
                 key=CHANGE_PRIORITY.__getitem__,
             )
         elif path.startswith("scripts/") or path.startswith("templates/"):

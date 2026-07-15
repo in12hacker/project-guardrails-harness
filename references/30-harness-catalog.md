@@ -5,8 +5,9 @@ Harnesses prove guardrails. A rule without a harness is advisory until a reliabl
 ## Contents
 
 Gate Levels; Harness Matrix; Ecosystem Hints; Architecture and Fitness Checks;
-Test/Contract/Documentation Checks; Policy/Cleanliness/Failure/Secret Checks;
-Runtime and Boundary Robustness; Version/Coverage/Product Acceptance;
+Test/Contract/Documentation Checks; Execution Closure Candidates;
+Policy/Cleanliness/Failure/Secret Checks; Runtime and Boundary Robustness;
+Version/Coverage/Product Acceptance;
 Runner and Performance Policy; Control Evidence; Claims; Production and
 Commercial Harnesses.
 
@@ -150,6 +151,88 @@ TestBasisHarness:
 ```
 
 Tests used in completion, closeout, product, or release claims need traceability to a requirement, risk, bug, or regression. Downgrade direct API shortcuts, synthetic events, low-level probes, and mocks when they bypass the product behavior being claimed.
+
+## Execution Closure Harness Candidates
+
+Use these models when an effect crosses an execution boundary such as a
+container, browser, device, remote runner, cloud environment, or GPU worker.
+They remain `proposal` candidates until owner review, compatibility analysis,
+positive fixtures, and false-positive fixtures are complete. Candidate
+validation returns `CANDIDATE_VALID`, never a control `PASS`, and does not read
+or write the v3 evidence ledger.
+
+```text
+ExecutionObservation:
+  run_id:
+  execution_state: executed|failed|not_executed
+  phase: pre_effect|effect|post_effect
+  vantage_point: host|container|browser|device|remote_runner|cloud|gpu
+  target:
+  command_digest:
+  started_at:
+  finished_at:
+  result_digest:
+  status:
+  subject_sha256:
+  authorization_id:
+  assertion_kind: capability_preflight|target_context_readiness|effect|product_assertion|cleanup
+  artifact_ref:
+  evidence_kind: runtime|static_reachability
+```
+
+```text
+EntrypointClosureHarness:
+  entrypoint:
+  preconditions:
+  authorization_boundary:
+  effect_commit_point:
+  runtime_assertions:
+  required_artifacts:
+  offline_verifier:
+  cleanup_owner:
+  failure_path:
+  static_evidence:
+```
+
+```text
+ExternalAcquisitionEnvelope:
+  target:
+  required_vantage_points:       # selected per assertion; preflight/readiness equal effect
+  authorization:
+    authorization_id:
+    required:
+    granted:
+  artifact_set:                  # exact, not a minimum subset
+```
+
+The closure contract requires both evidence classes:
+
+- static composition evidence proves the production entrypoint can reach the
+  authorization boundary, effect commit point, assertions, and cleanup path;
+- runtime observations prove those paths actually executed from each declared
+  vantage point against the selected target.
+
+Static reachability never substitutes for runtime execution. Every required
+observation must be `executed` and `PASS`, bind the same run, subject, target,
+and authorization, use the assertion-specific vantage point, occur in
+preflight/readiness/effect/assertion/cleanup order, and close exactly the
+declared artifact set. `not_executed`, host-only preflight for a non-host
+effect, post-effect preflight, run mismatch, failed cleanup, missing artifact,
+or unknown extra artifact rejects the candidate.
+
+The portable validator and fixtures are runnable without project-specific
+dependencies:
+
+```bash
+python3 "$SKILL_DIR/scripts/validate_harness_candidate.py" candidate.json
+python3 -m unittest -v \
+  tests.test_quality_framework.QualityFrameworkTest.test_portable_execution_harness_candidate_accepts_only_closed_runtime_chain
+```
+
+Promotion into active controls requires a separate owner decision and schema
+compatibility review. If future integration needs new ledger fields, treat it
+as a next-schema design; do not extend v3 silently and do not add a compatibility
+reader.
 
 ## Interface Contract Checks
 

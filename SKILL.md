@@ -142,6 +142,21 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      --phase-id <phase> --task-id <task> --check
    ```
 
+   The renderer must invoke readiness with
+   `--require-level TASK_CLAIM_READY`. A typed `BLOCKED` or `NOT_EVALUATED`
+   result may be rendered for an honest not-ready handoff; tool failure,
+   malformed JSON, or an untyped blocker must fail generation. Keep control
+   verification capabilities separate from product acquisition capabilities.
+   Because v3 has no acquisition mapping, the generated handoff marks product
+   acquisition applicability `NOT_EVALUATED` and execution `BLOCKED`; an empty
+   verification capability list never authorizes product acquisition. Do not
+   promote this conservative execution state to a task-level blocker unless the
+   project explicitly declares that the task requires product acquisition.
+   Portable execution Harness candidates remain proposals outside the v3
+   ledger. Model `committed` and `prevented` effects separately: a prevented
+   effect has a runtime attempt and outcome but no side-effect commit. Never
+   reinterpret a deny decision record as the protected effect's commit.
+
 10. **Learn and evolve**
    - Feed incidents, escaped defects, SLO breaches, customer outcomes, vulnerability response, and repeated review findings back into project controls and durable memory.
    - Record external-project observations with immutable revision, evidence paths, profile, applicability boundary, and counterexamples.

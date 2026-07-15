@@ -163,6 +163,14 @@ or write the v3 evidence ledger.
 
 ```text
 ExecutionObservation:
+  observation_id:
+  hop_id:
+  capability_id:
+  depends_on:                 # temporal/prerequisite DAG edges
+  flow_depends_on:            # execution/data-flow DAG edges
+  effect_id:                  # required for effect lifecycle + product assertion
+  effect_result:              # committed|prevented on outcome/assertion; null otherwise
+  required_capability_ids:    # non-empty only for effect_attempt
   run_id:
   execution_state: executed|failed|not_executed
   phase: pre_effect|effect|post_effect
@@ -175,7 +183,7 @@ ExecutionObservation:
   status:
   subject_sha256:
   authorization_id:
-  assertion_kind: capability_preflight|target_context_readiness|effect|product_assertion|cleanup
+  assertion_kind: capability_preflight|target_context_readiness|effect_attempt|effect_execution_step|effect_commit|effect_outcome|product_assertion|cleanup
   artifact_ref:
   evidence_kind: runtime|static_reachability
 ```
@@ -185,19 +193,28 @@ EntrypointClosureHarness:
   entrypoint:
   preconditions:
   authorization_boundary:
-  effect_commit_point:
-  runtime_assertions:
+  effect_attempts:             # exact effect_attempt observation IDs
+  effect_execution_steps:      # exact intermediate execution/data-flow observation IDs
+  effect_commit_points:        # exact commit IDs; empty for prevented-only runs
+  effect_outcomes:             # exact effect_outcome observation IDs
+  runtime_assertions:          # exact product_assertion observation IDs
   required_artifacts:
   offline_verifier:
-  cleanup_owner:
-  failure_path:
-  static_evidence:
+  cleanup_observations:        # exact cleanup observation IDs
+  cleanup_owners:              # exact owners derived from cleanup observations
+  failure_paths:               # structured path ID + exact cleanup IDs/owners
+  static_evidence:             # artifact_ref + SHA-256 + static_reachability
 ```
 
 ```text
 ExternalAcquisitionEnvelope:
-  target:
-  required_vantage_points:       # selected per assertion; preflight/readiness equal effect
+  capabilities:
+    - capability_id:
+      hop_id:
+      owner:
+      target:
+      vantage_point:
+      authorization_required:
   authorization:
     authorization_id:
     required:
@@ -205,20 +222,75 @@ ExternalAcquisitionEnvelope:
   artifact_set:                  # exact, not a minimum subset
 ```
 
+```text
+ExecutionHop:
+  hop_id:
+  owner:
+  target:
+  vantage_point:
+  depends_on:                    # hop DAG edges
+```
+
+```text
+ProtectionEdge:
+  capability_id:
+  effect_id:
+  preflight_observation_id:
+  readiness_observation_id:
+```
+
 The closure contract requires both evidence classes:
 
-- static composition evidence proves the production entrypoint can reach the
-  authorization boundary, effect commit point, assertions, and cleanup path;
+- digest-bound static composition artifacts support review that the production
+  entrypoint can reach the authorization boundary, effect lifecycle,
+  assertions, and cleanup path; the proposal validator checks their closure,
+  not their project-specific semantic truth;
 - runtime observations prove those paths actually executed from each declared
   vantage point against the selected target.
 
 Static reachability never substitutes for runtime execution. Every required
-observation must be `executed` and `PASS`, bind the same run, subject, target,
-and authorization, use the assertion-specific vantage point, occur in
-preflight/readiness/effect/assertion/cleanup order, and close exactly the
-declared artifact set. `not_executed`, host-only preflight for a non-host
-effect, post-effect preflight, run mismatch, failed cleanup, missing artifact,
-or unknown extra artifact rejects the candidate.
+observation must be `executed` and `PASS`, bind the same run, subject, and
+authorization, reference a declared capability and hop, and close exactly the
+declared artifact set. Each capability owns its target and vantage point; a
+container capability and a host capability are separate declarations rather
+than a false shared context. Multiple observations may use the same assertion
+kind.
+
+The contract deliberately separates two relations:
+
+- the hop graph plus `flow_depends_on` records execution/data flow, such as
+  browser to container to host to assertion;
+- `depends_on` plus protection edges records prerequisite order, allowing host
+  or device readiness to precede an effect initiated from an upstream hop.
+
+All graphs must be acyclic and timestamps must agree with temporal edges. Every
+flow edge must also have temporal order, follow the hop DAG, and witness each
+direct hop dependency. Each effect has exactly one attempt and outcome, plus
+zero or more intermediate execution steps. A `committed` outcome requires
+exactly one commit; a `prevented` outcome forbids a commit. The attempt declares
+its complete `required_capability_ids`; these must exactly match protection
+edges whose preflight precedes readiness and whose readiness precedes the
+attempt and any commit. This prevents a post-attempt preflight from being
+presented as protection and lets deny/no-side-effect paths remain honest.
+
+Closure fields are references, not descriptions: attempt, execution-step,
+commit, outcome, assertion, and cleanup ID sets must exactly match runtime
+observations. Failure paths bind exact cleanup IDs and owners; static evidence
+binds project-relative artifacts and digests. Every declared hop and capability
+must be used by runtime observation; omit non-participants from the run
+candidate. Product assertions bind one effect and repeat its observed
+`committed|prevented` result, require that effect's outcome in both temporal and
+flow ancestry, and never turn a prevented effect into a fabricated commit.
+Cleanup requires temporal outcome ancestry, and every effect requires assertion
+and cleanup descendants.
+`not_executed`, unused declarations, arbitrary closure text,
+capability/hop mismatch, post-attempt preflight, absent flow or protection
+edges, run mismatch, failed cleanup, missing artifact, or unknown extra
+artifact rejects the candidate.
+
+Candidate format `2.0` replaces the rejected single-hop proposal. It is not a
+v3 evidence schema and has no compatibility reader. Promotion into the active
+control plane remains forbidden until owner and compatibility review complete.
 
 The portable validator and fixtures are runnable without project-specific
 dependencies:

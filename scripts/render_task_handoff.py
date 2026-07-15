@@ -19,9 +19,12 @@ from quality_common import load_json_yaml, safe_relative_path
 HEADER_BEGIN = "<!-- PROJECT-GUARDRAILS:TASK-HANDOFF:BEGIN -->"
 HEADER_END = "<!-- PROJECT-GUARDRAILS:TASK-HANDOFF:END -->"
 DEFAULT_OUTPUT = ".guardrails/evidence/task-handoff.md"
+REQUIRED_READINESS_LEVEL = "TASK_CLAIM_READY"
+READINESS_SCHEMA_VERSION = "1.1"
 RESERVED_OVERRIDE_PATTERN = re.compile(
     r"(?mi)^\s*(campaign_id|campaign_revision|phase_id|task_id|affected_control_ids|"
-    r"assessed_scope|subject_binding|skill_binding|readiness|authorization)\s*:",
+    r"assessed_scope|subject_binding|skill_binding|readiness|capabilities|authorization|"
+    r"handoff_blocker_details|action_policy)\s*:",
 )
 
 
@@ -77,22 +80,61 @@ def manual_override_fields(body: str) -> list[str]:
     return sorted({match.group(1) for match in RESERVED_OVERRIDE_PATTERN.finditer(body)})
 
 
-def readiness_report(args: argparse.Namespace, root: Path) -> dict:
-    command = [
+def readiness_command(args: argparse.Namespace, root: Path) -> list[str]:
+    return [
         sys.executable, str(Path(__file__).resolve().parent / "assess_readiness.py"),
         "--root", str(root), "--guardrails-dir", args.guardrails_dir,
         "--campaign-id", args.campaign_id,
         "--campaign-revision", str(args.campaign_revision),
         "--phase-id", args.phase_id, "--task-id", args.task_id,
+        "--require-level", REQUIRED_READINESS_LEVEL,
     ]
+
+
+def validate_readiness_report(report: object, returncode: int) -> dict:
+    if not isinstance(report, dict):
+        raise ValueError("readiness command returned a non-object report")
+    if report.get("schema_version") != READINESS_SCHEMA_VERSION:
+        raise ValueError("readiness command returned an unsupported schema version")
+    if not isinstance(report.get("subject_binding"), dict):
+        raise ValueError("readiness command omitted subject_binding")
+    levels = report.get("levels")
+    if not isinstance(levels, dict) or not isinstance(
+        levels.get(REQUIRED_READINESS_LEVEL), dict,
+    ):
+        raise ValueError(f"readiness command omitted {REQUIRED_READINESS_LEVEL}")
+    required = levels[REQUIRED_READINESS_LEVEL]
+    status = required.get("status")
+    expected_statuses = {0: {"READY"}, 1: {"BLOCKED", "NOT_EVALUATED"}}
+    if returncode not in expected_statuses:
+        raise ValueError(f"readiness command failed with infrastructure exit {returncode}")
+    if status not in expected_statuses[returncode]:
+        raise ValueError(
+            f"readiness exit {returncode} is inconsistent with {REQUIRED_READINESS_LEVEL}={status}",
+        )
+    if returncode == 1:
+        details = required.get("blocker_details")
+        if not isinstance(details, list) or not details:
+            raise ValueError("non-ready task report requires typed blocker_details")
+        for index, detail in enumerate(details):
+            if not isinstance(detail, dict) or any(
+                not isinstance(detail.get(field), str) or not detail[field].strip()
+                for field in ("code", "category", "message")
+            ):
+                raise ValueError(
+                    f"task blocker_details[{index}] must contain code, category, and message",
+                )
+    return report
+
+
+def readiness_report(args: argparse.Namespace, root: Path) -> dict:
+    command = readiness_command(args, root)
     result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=120)
     try:
         report = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise ValueError(f"readiness command did not return JSON: {result.stderr.strip()}") from exc
-    if result.returncode != 0:
-        raise ValueError(f"readiness framework validation failed: {json.dumps(report, sort_keys=True)}")
-    return report
+    return validate_readiness_report(report, result.returncode)
 
 
 def build_payload(args: argparse.Namespace, root: Path, guardrails: Path) -> dict:
@@ -119,6 +161,12 @@ def build_payload(args: argparse.Namespace, root: Path, guardrails: Path) -> dic
     capabilities_by_id = {
         capability["id"]: capability for capability in registry.get("capabilities", [])
     }
+    missing_capabilities = sorted(set(capability_ids) - set(capabilities_by_id))
+    if missing_capabilities:
+        raise ValueError(
+            "task control verification references missing capabilities: "
+            + ", ".join(missing_capabilities),
+        )
     required_capabilities = [
         {
             "id": capability_id,
@@ -128,15 +176,22 @@ def build_payload(args: argparse.Namespace, root: Path, guardrails: Path) -> dic
             ],
         }
         for capability_id in capability_ids
-        if capability_id in capabilities_by_id
     ]
     authorized_controls = sorted(
         control["id"] for control in controls
         if control.get("execution", {}).get("authorization_required") is True
     )
     readiness = readiness_report(args, root)
+    acquisition_blocker = {
+        "code": "PRODUCT_ACQUISITION_CAPABILITIES_UNMODELED",
+        "category": "authorization",
+        "message": (
+            "product acquisition capabilities are not modeled by the v3 control plane; "
+            "project-owned acquisition authorization is required before execution"
+        ),
+    }
     return {
-        "handoff_schema_version": "1.0",
+        "handoff_schema_version": "1.1",
         "subject_binding": readiness["subject_binding"],
         "skill_binding": manifest["framework"],
         "campaign": {
@@ -148,12 +203,30 @@ def build_payload(args: argparse.Namespace, root: Path, guardrails: Path) -> dic
         "affected_control_ids": sorted(affected),
         "assessed_scope": task["assessed_scope"],
         "readiness": readiness["levels"],
+        "capabilities": {
+            "control_verification": {
+                "status": "MODELED",
+                "required_capability_ids": capability_ids,
+                "required_capabilities": required_capabilities,
+                "controls_requiring_authorization": authorized_controls,
+            },
+            "product_acquisition": {
+                "status": "UNMODELED",
+                "applicability": "NOT_EVALUATED",
+                "execution": "BLOCKED",
+                "required_capability_ids": None,
+                "blocker_details": [acquisition_blocker],
+            },
+        },
         "authorization": {
-            "automatic_local_unprivileged": manifest["authority"]["local_unprivileged_controls"],
-            "separate_authorization_required": manifest["authority"]["separate_authorization_required"],
-            "required_capability_ids": capability_ids,
-            "required_capabilities": required_capabilities,
-            "task_controls_requiring_authorization": authorized_controls,
+            "general_policy": {
+                "automatic_local_unprivileged": manifest["authority"][
+                    "local_unprivileged_controls"
+                ],
+                "separate_authorization_required": manifest["authority"][
+                    "separate_authorization_required"
+                ],
+            },
         },
         "action_policy": {
             "allowed": [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -138,6 +139,19 @@ class QualityFrameworkTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def load_script_module(self, name: str, path: Path):
+        scripts = str(ROOT / "scripts")
+        sys.path.insert(0, scripts)
+        try:
+            spec = importlib.util.spec_from_file_location(name, path)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        finally:
+            sys.path.remove(scripts)
 
     def test_initializer_generates_machine_sources_and_traceability(self) -> None:
         project = self.make_project()
@@ -1419,23 +1433,20 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertNotEqual("0" * 64, updated["framework"]["content_sha256"])
 
     def test_default_update_declaration_treats_reviewed_docs_as_control_logic(self) -> None:
-        project = self.make_project()
-        manifest_path = project / ".guardrails" / "quality-manifest.yaml"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["framework"]["content_sha256"] = "0" * 64
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        checked = subprocess.run(
-            [sys.executable, str(REVIEW_UPDATE), "--root", str(project), "--check"],
-            check=False, capture_output=True, text=True,
+        module = self.load_script_module("review_skill_update_fixture", REVIEW_UPDATE)
+        self.assertEqual("presentation", module.inferred_change_class([]))
+        for paths in (
+            ["SKILL.md"],
+            ["references/30-harness-catalog.md"],
+            ["scripts/render_task_handoff.py"],
+            ["templates/preflight.py"],
+        ):
+            with self.subTest(paths=paths):
+                self.assertEqual("control_logic", module.inferred_change_class(paths))
+        self.assertEqual(
+            "schema", module.inferred_change_class(["schemas/control-registry.schema.json"]),
         )
-        self.assertEqual(1, checked.returncode, checked.stderr)
-        report = json.loads(checked.stdout)
-        self.assertEqual("update_available", report["status"])
-        self.assertEqual("control_logic", report["change_class"])
-        self.assertEqual("control_logic", report["path_change_class"])
-        self.assertTrue(report["compatible"])
-        self.assertFalse(report["requires_seal"])
-        self.assertTrue(report["rerun_control_ids"])
+        self.assertEqual("incompatible_semantics", module.inferred_change_class(None))
 
     def test_skill_update_refuses_incompatible_schema_without_mutation(self) -> None:
         project = self.make_project()
@@ -1547,6 +1558,52 @@ class QualityFrameworkTest(unittest.TestCase):
             path: path.read_bytes() for path in guardrails.rglob("*") if path.is_file()
         })
 
+    def test_handoff_requires_task_claim_readiness_and_accepts_typed_blocked(self) -> None:
+        module = self.load_script_module("render_task_handoff_fixture", HANDOFF)
+        args = argparse.Namespace(
+            guardrails_dir=".guardrails", campaign_id="CAMPAIGN-1",
+            campaign_revision=7, phase_id="PHASE-1", task_id="TASK-1",
+        )
+        report = {
+            "schema_version": "1.1",
+            "subject_binding": {"commit": "fixture"},
+            "levels": {
+                "TASK_CLAIM_READY": {
+                    "status": "BLOCKED", "control_ids": [],
+                    "blockers": ["evidence missing"],
+                    "blocker_details": [{
+                        "code": "QUALITY_BLOCKER", "category": "quality",
+                        "message": "evidence missing",
+                    }],
+                },
+            },
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=json.dumps(report), stderr="",
+        )
+        with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(report, module.readiness_report(args, Path("/project")))
+        command = run.call_args.args[0]
+        require_index = command.index("--require-level")
+        self.assertEqual("TASK_CLAIM_READY", command[require_index + 1])
+        self.assertIn("--campaign-id", command)
+        self.assertIn("--campaign-revision", command)
+        self.assertIn("--phase-id", command)
+        self.assertIn("--task-id", command)
+
+        invalid = json.loads(json.dumps(report))
+        invalid["levels"]["TASK_CLAIM_READY"]["blocker_details"] = []
+        with self.assertRaisesRegex(ValueError, "typed blocker_details"):
+            module.validate_readiness_report(invalid, 1)
+        with self.assertRaisesRegex(ValueError, "infrastructure exit 2"):
+            module.validate_readiness_report(report, 2)
+        invalid_json = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="not-json", stderr="fixture failure",
+        )
+        with mock.patch.object(module.subprocess, "run", return_value=invalid_json):
+            with self.assertRaisesRegex(ValueError, "did not return JSON"):
+                module.readiness_report(args, Path("/project"))
+
     def test_generated_task_handoff_is_deterministic_and_stale_on_campaign_revision(self) -> None:
         project = self.make_project(development_mode="ai_brownfield")
         registry = json.loads(
@@ -1597,6 +1654,17 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual([control_id], payload["affected_control_ids"])
         self.assertEqual(["src", "tests"], payload["assessed_scope"])
         self.assertIn("TASK_CLAIM_READY", payload["readiness"])
+        self.assertEqual("BLOCKED", payload["readiness"]["TASK_CLAIM_READY"]["status"])
+        self.assertEqual(
+            "MODELED", payload["capabilities"]["control_verification"]["status"],
+        )
+        acquisition = payload["capabilities"]["product_acquisition"]
+        self.assertEqual("UNMODELED", acquisition["status"])
+        self.assertEqual("NOT_EVALUATED", acquisition["applicability"])
+        self.assertEqual("BLOCKED", acquisition["execution"])
+        self.assertIsNone(acquisition["required_capability_ids"])
+        self.assertTrue(acquisition["blocker_details"])
+        self.assertNotIn("handoff_blocker_details", payload)
         self.assertTrue(payload["action_policy"]["machine_fields_are_authoritative"])
 
         rerendered = subprocess.run(
@@ -1748,27 +1816,76 @@ class QualityFrameworkTest(unittest.TestCase):
 
     def test_portable_execution_harness_candidate_accepts_only_closed_runtime_chain(self) -> None:
         digest = "a" * 64
-        kinds = (
-            "capability_preflight", "target_context_readiness", "effect",
-            "product_assertion", "cleanup",
-        )
         phases = {
             "capability_preflight": "pre_effect",
             "target_context_readiness": "pre_effect",
-            "effect": "effect",
+            "effect_attempt": "effect",
+            "effect_execution_step": "effect",
+            "effect_commit": "effect",
+            "effect_outcome": "post_effect",
             "product_assertion": "post_effect",
             "cleanup": "post_effect",
         }
-        vantage = {
-            "capability_preflight": "container",
-            "target_context_readiness": "container",
-            "effect": "container",
-            "product_assertion": "browser",
-            "cleanup": "container",
-        }
-        artifacts = [f"evidence/{kind}.json" for kind in kinds]
+        hops = [
+            {
+                "hop_id": "browser-entry", "owner": "client-owner",
+                "target": "client-session", "vantage_point": "browser", "depends_on": [],
+            },
+            {
+                "hop_id": "container-runtime", "owner": "runtime-owner",
+                "target": "runtime-container", "vantage_point": "container",
+                "depends_on": ["browser-entry"],
+            },
+            {
+                "hop_id": "host-provider", "owner": "platform-owner",
+                "target": "host-provider", "vantage_point": "host",
+                "depends_on": ["container-runtime"],
+            },
+            {
+                "hop_id": "browser-assertion", "owner": "client-owner",
+                "target": "client-session", "vantage_point": "browser",
+                "depends_on": ["host-provider"],
+            },
+            {
+                "hop_id": "host-cleanup", "owner": "platform-owner",
+                "target": "host-provider", "vantage_point": "host",
+                "depends_on": ["browser-assertion"],
+            },
+            {
+                "hop_id": "container-cleanup", "owner": "runtime-owner",
+                "target": "runtime-container", "vantage_point": "container",
+                "depends_on": ["host-cleanup"],
+            },
+        ]
+        capabilities = [
+            {
+                "capability_id": f"CAP-{hop['hop_id']}", "hop_id": hop["hop_id"],
+                "owner": hop["owner"], "target": hop["target"],
+                "vantage_point": hop["vantage_point"], "authorization_required": True,
+            }
+            for hop in hops
+        ]
+        observation_specs = [
+            ("OBS-browser-preflight", "browser-entry", "capability_preflight", None, None, [], []),
+            ("OBS-browser-ready", "browser-entry", "target_context_readiness", None, None, ["OBS-browser-preflight"], []),
+            ("OBS-container-preflight", "container-runtime", "capability_preflight", None, None, ["OBS-browser-ready"], []),
+            ("OBS-container-ready", "container-runtime", "target_context_readiness", None, None, ["OBS-container-preflight"], []),
+            ("OBS-host-preflight", "host-provider", "capability_preflight", None, None, ["OBS-container-ready"], []),
+            ("OBS-host-ready", "host-provider", "target_context_readiness", None, None, ["OBS-host-preflight"], []),
+            ("OBS-effect-attempt", "browser-entry", "effect_attempt", "EFFECT-1", None, ["OBS-host-ready"], []),
+            ("OBS-effect-step", "container-runtime", "effect_execution_step", "EFFECT-1", None, ["OBS-effect-attempt"], ["OBS-effect-attempt"]),
+            ("OBS-effect-commit", "host-provider", "effect_commit", "EFFECT-1", None, ["OBS-effect-step"], ["OBS-effect-step"]),
+            ("OBS-effect-outcome", "host-provider", "effect_outcome", "EFFECT-1", "committed", ["OBS-effect-commit"], ["OBS-effect-commit"]),
+            ("OBS-browser-assert", "browser-assertion", "product_assertion", "EFFECT-1", "committed", ["OBS-effect-outcome"], ["OBS-effect-outcome"]),
+            ("OBS-host-cleanup", "host-cleanup", "cleanup", None, None, ["OBS-browser-assert"], ["OBS-browser-assert"]),
+            ("OBS-container-cleanup", "container-cleanup", "cleanup", None, None, ["OBS-host-cleanup"], ["OBS-host-cleanup"]),
+        ]
+        hops_by_id = {hop["hop_id"]: hop for hop in hops}
+        runtime_artifacts = [f"evidence/{item[0]}.json" for item in observation_specs]
+        static_artifact = "evidence/static-composition.json"
+        artifacts = [*runtime_artifacts, static_artifact]
         candidate = {
-            "candidate_version": "1.0",
+            "candidate_version": "2.0",
             "candidate_status": "proposal",
             "owner_review": {"status": "pending", "owner": "quality", "reviewed_at": None},
             "compatibility": {
@@ -1783,35 +1900,74 @@ class QualityFrameworkTest(unittest.TestCase):
                 "entrypoint": "project-owned-entrypoint",
                 "preconditions": ["target is selected"],
                 "authorization_boundary": "before effect",
-                "effect_commit_point": "effect invocation",
-                "runtime_assertions": ["observable product outcome"],
+                "effect_attempts": ["OBS-effect-attempt"],
+                "effect_execution_steps": ["OBS-effect-step"],
+                "effect_commit_points": ["OBS-effect-commit"],
+                "effect_outcomes": ["OBS-effect-outcome"],
+                "runtime_assertions": ["OBS-browser-assert"],
                 "required_artifacts": artifacts,
                 "offline_verifier": "project-owned-offline-verifier",
-                "cleanup_owner": "runtime-owner",
-                "failure_path": "abort before effect or clean up after effect",
-                "static_evidence": ["entrypoint reaches runtime assertion in composition test"],
+                "cleanup_observations": ["OBS-host-cleanup", "OBS-container-cleanup"],
+                "cleanup_owners": ["platform-owner", "runtime-owner"],
+                "failure_paths": [{
+                    "path_id": "cleanup-after-effect",
+                    "owners": ["platform-owner", "runtime-owner"],
+                    "cleanup_observation_ids": ["OBS-host-cleanup", "OBS-container-cleanup"],
+                }],
+                "static_evidence": [{
+                    "artifact_ref": static_artifact,
+                    "sha256": digest,
+                    "evidence_kind": "static_reachability",
+                }],
             },
             "acquisition": {
-                "target": "portable-target",
-                "required_vantage_points": vantage,
+                "capabilities": capabilities,
                 "authorization": {
                     "authorization_id": "AUTH-1", "required": True, "granted": True,
                 },
                 "artifact_set": artifacts,
             },
+            "hops": hops,
+            "protection_edges": [
+                {
+                    "capability_id": f"CAP-{hop_id}", "effect_id": "EFFECT-1",
+                    "preflight_observation_id": f"OBS-{prefix}-preflight",
+                    "readiness_observation_id": f"OBS-{prefix}-ready",
+                }
+                for hop_id, prefix in (
+                    ("browser-entry", "browser"),
+                    ("container-runtime", "container"),
+                    ("host-provider", "host"),
+                )
+            ],
             "observations": [
                 {
+                    "observation_id": observation_id,
+                    "hop_id": hop_id,
+                    "capability_id": f"CAP-{hop_id}",
+                    "depends_on": dependencies,
+                    "flow_depends_on": flow_dependencies,
+                    "effect_id": effect_id,
+                    "effect_result": effect_result,
+                    "required_capability_ids": [
+                        "CAP-browser-entry", "CAP-container-runtime", "CAP-host-provider",
+                    ] if kind == "effect_attempt" else [],
                     "run_id": "RUN-1", "execution_state": "executed",
-                    "phase": phases[kind], "vantage_point": vantage[kind],
-                    "target": "portable-target", "command_digest": digest,
+                    "phase": phases[kind],
+                    "vantage_point": hops_by_id[hop_id]["vantage_point"],
+                    "target": hops_by_id[hop_id]["target"], "command_digest": digest,
                     "started_at": f"2026-07-15T00:00:{index * 2:02d}+00:00",
                     "finished_at": f"2026-07-15T00:00:{index * 2 + 1:02d}+00:00",
                     "result_digest": digest, "status": "PASS",
                     "subject_sha256": digest, "authorization_id": "AUTH-1",
-                    "assertion_kind": kind, "artifact_ref": artifacts[index],
+                    "assertion_kind": kind, "artifact_ref": runtime_artifacts[index],
                     "evidence_kind": "runtime",
                 }
-                for index, kind in enumerate(kinds)
+                for index, (
+                    observation_id, hop_id, kind, effect_id, effect_result,
+                    dependencies, flow_dependencies,
+                )
+                in enumerate(observation_specs)
             ],
         }
         fixture = Path(tempfile.mkdtemp(prefix="harness-candidate-test-")) / "candidate.json"
@@ -1827,35 +1983,197 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual(0, accepted.returncode, accepted.stdout + accepted.stderr)
         self.assertEqual("CANDIDATE_VALID", json.loads(accepted.stdout)["status"])
         self.assertNotIn("\"status\": \"PASS\"", accepted.stdout)
+        self.assertGreater(
+            sum(
+                item["assertion_kind"] == "capability_preflight"
+                for item in candidate["observations"]
+            ),
+            1,
+        )
+
+        prevented = json.loads(json.dumps(candidate))
+        prevented["observations"] = [
+            item for item in prevented["observations"]
+            if item["observation_id"] != "OBS-effect-commit"
+        ]
+        prevented["entrypoint_closure"]["effect_commit_points"] = []
+        prevented["entrypoint_closure"]["required_artifacts"].remove(
+            "evidence/OBS-effect-commit.json",
+        )
+        prevented["acquisition"]["artifact_set"].remove(
+            "evidence/OBS-effect-commit.json",
+        )
+        prevented_observations = {
+            item["observation_id"]: item for item in prevented["observations"]
+        }
+        prevented_observations["OBS-effect-outcome"].update(
+            depends_on=["OBS-effect-step"], flow_depends_on=["OBS-effect-step"],
+            effect_result="prevented",
+        )
+        prevented_observations["OBS-browser-assert"].update(effect_result="prevented")
+        accepted_prevented = validate(prevented)
+        self.assertEqual(
+            0, accepted_prevented.returncode,
+            accepted_prevented.stdout + accepted_prevented.stderr,
+        )
+        self.assertEqual("CANDIDATE_VALID", json.loads(accepted_prevented.stdout)["status"])
+
+        def post_attempt_preflight(value: dict) -> None:
+            observations = {
+                item["observation_id"]: item for item in value["observations"]
+            }
+            observations["OBS-effect-attempt"].update(
+                depends_on=["OBS-container-ready"],
+                started_at="2026-07-15T00:00:08+00:00",
+                finished_at="2026-07-15T00:00:09+00:00",
+            )
+            observations["OBS-host-preflight"].update(
+                depends_on=["OBS-effect-attempt"],
+                started_at="2026-07-15T00:00:10+00:00",
+                finished_at="2026-07-15T00:00:11+00:00",
+            )
+            observations["OBS-host-ready"].update(
+                started_at="2026-07-15T00:00:12+00:00",
+                finished_at="2026-07-15T00:00:13+00:00",
+            )
+            for index, observation_id in enumerate((
+                "OBS-effect-step", "OBS-effect-commit", "OBS-effect-outcome", "OBS-browser-assert",
+                "OBS-host-cleanup", "OBS-container-cleanup",
+            ), start=7):
+                observations[observation_id].update(
+                    started_at=f"2026-07-15T00:00:{index * 2:02d}+00:00",
+                    finished_at=f"2026-07-15T00:00:{index * 2 + 1:02d}+00:00",
+                )
+
+        def unused_hop(value: dict) -> None:
+            value["hops"].append({
+                "hop_id": "unused-device", "owner": "device-owner",
+                "target": "device-target", "vantage_point": "device",
+                "depends_on": [],
+            })
+
+        def unused_capability(value: dict) -> None:
+            value["acquisition"]["capabilities"].append({
+                "capability_id": "CAP-unused-host", "hop_id": "host-provider",
+                "owner": "platform-owner", "target": "host-provider",
+                "vantage_point": "host", "authorization_required": True,
+            })
+
+        def remove_commit(value: dict, *, result: str) -> None:
+            value["observations"] = [
+                item for item in value["observations"]
+                if item["observation_id"] != "OBS-effect-commit"
+            ]
+            value["entrypoint_closure"]["effect_commit_points"] = []
+            value["entrypoint_closure"]["required_artifacts"].remove(
+                "evidence/OBS-effect-commit.json",
+            )
+            value["acquisition"]["artifact_set"].remove(
+                "evidence/OBS-effect-commit.json",
+            )
+            observations = {
+                item["observation_id"]: item for item in value["observations"]
+            }
+            observations["OBS-effect-outcome"].update(
+                depends_on=["OBS-effect-step"], flow_depends_on=["OBS-effect-step"],
+                effect_result=result,
+            )
+            observations["OBS-browser-assert"].update(effect_result=result)
 
         mutations = {
-            "not_executed": lambda value: value["observations"][2].update(
+            "not_executed": lambda value: value["observations"][8].update(
                 execution_state="not_executed",
             ),
-            "wrong_vantage": lambda value: value["observations"][0].update(
-                vantage_point="host",
+            "wrong_vantage": lambda value: value["observations"][4].update(
+                vantage_point="container",
             ),
-            "host_preflight_for_container_effect": lambda value: value["acquisition"][
-                "required_vantage_points"
-            ].update(capability_preflight="host"),
-            "wrong_order": lambda value: value["observations"][2].update(
+            "capability_owner_mismatch": lambda value: value["acquisition"][
+                "capabilities"
+            ][2].update(owner="wrong-owner"),
+            "wrong_order": lambda value: value["observations"][8].update(
                 started_at="2026-07-14T23:59:00+00:00",
             ),
-            "run_mismatch": lambda value: value["observations"][3].update(run_id="RUN-OTHER"),
-            "subject_mismatch": lambda value: value["observations"][3].update(
+            "run_mismatch": lambda value: value["observations"][10].update(run_id="RUN-OTHER"),
+            "subject_mismatch": lambda value: value["observations"][10].update(
                 subject_sha256="b" * 64,
             ),
-            "authorization_mismatch": lambda value: value["observations"][2].update(
+            "authorization_mismatch": lambda value: value["observations"][8].update(
                 authorization_id="AUTH-OTHER",
             ),
-            "static_is_not_runtime": lambda value: value["observations"][2].update(
+            "static_is_not_runtime": lambda value: value["observations"][8].update(
                 evidence_kind="static_reachability",
             ),
-            "cleanup_failed": lambda value: value["observations"][4].update(status="FAIL"),
+            "cleanup_failed": lambda value: value["observations"][12].update(status="FAIL"),
             "unknown_artifact": lambda value: value["acquisition"]["artifact_set"].append(
                 "evidence/unknown.json",
             ),
-            "missing_preflight": lambda value: value["observations"].pop(0),
+            "missing_preflight": lambda value: value["observations"].pop(4),
+            "hop_cycle": lambda value: value["hops"][0]["depends_on"].append(
+                "container-cleanup",
+            ),
+            "missing_effect_dependency": lambda value: value["observations"][8].update(
+                depends_on=[],
+            ),
+            "disconnected_flow": lambda value: value["observations"][9].update(
+                flow_depends_on=[],
+            ),
+            "assertion_without_outcome_flow": lambda value: value["observations"][10].update(
+                flow_depends_on=["OBS-host-ready"],
+            ),
+            "post_attempt_preflight": post_attempt_preflight,
+            "unused_hop": unused_hop,
+            "unused_capability": unused_capability,
+            "unbound_commit_point": lambda value: value["entrypoint_closure"].update(
+                effect_commit_points=["arbitrary-text"],
+            ),
+            "unbound_runtime_assertion": lambda value: value["entrypoint_closure"].update(
+                runtime_assertions=["arbitrary-text"],
+            ),
+            "unbound_cleanup_owner": lambda value: value["entrypoint_closure"].update(
+                cleanup_owners=["arbitrary-owner"],
+            ),
+            "missing_protection": lambda value: value["protection_edges"].pop(),
+            "conflated_attempt_commit": lambda value: value["observations"][6].update(
+                assertion_kind="effect_commit",
+            ),
+            "prevented_with_commit": lambda value: (
+                value["observations"][9].update(effect_result="prevented"),
+                value["observations"][10].update(effect_result="prevented"),
+            ),
+            "committed_without_commit": lambda value: remove_commit(value, result="committed"),
+            "outcome_result_missing": lambda value: value["observations"][9].update(
+                effect_result=None,
+            ),
+            "assertion_result_mismatch": lambda value: value["observations"][10].update(
+                effect_result="prevented",
+            ),
+            "assertion_wrong_effect": lambda value: value["observations"][10].update(
+                effect_id="EFFECT-UNKNOWN",
+            ),
+            "unbound_static_evidence": lambda value: value["entrypoint_closure"].update(
+                static_evidence=["arbitrary-text"],
+            ),
+            "unbound_failure_path": lambda value: value["entrypoint_closure"].update(
+                failure_paths=["arbitrary-text"],
+            ),
+        }
+        expected_diagnostics = {
+            "post_attempt_preflight": "readiness does not precede protected OBS-effect-attempt",
+            "unused_hop": "declared hop has no runtime observation: unused-device",
+            "unused_capability": "declared capability has no runtime observation: CAP-unused-host",
+            "unbound_commit_point": "effect_commit_points must exactly reference",
+            "unbound_runtime_assertion": "runtime_assertions must exactly reference",
+            "unbound_cleanup_owner": "cleanup_owners must exactly match",
+            "missing_protection": "required_capability_ids do not match protection edges",
+            "conflated_attempt_commit": "effect_attempts must exactly reference",
+            "assertion_without_outcome_flow": "lacks effect_outcome data flow",
+            "prevented_with_commit": "must not contain an effect_commit",
+            "committed_without_commit": "requires exactly one effect_commit",
+            "outcome_result_missing": "effect_result must be one of",
+            "assertion_result_mismatch": "assertion result does not match",
+            "assertion_wrong_effect": "references unknown effect",
+            "unbound_static_evidence": "must be an object",
+            "unbound_failure_path": "must be an object",
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name):
@@ -1863,7 +2181,13 @@ class QualityFrameworkTest(unittest.TestCase):
                 mutate(rejected_candidate)
                 rejected = validate(rejected_candidate)
                 self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
-                self.assertEqual("CANDIDATE_REJECTED", json.loads(rejected.stdout)["status"])
+                report = json.loads(rejected.stdout)
+                self.assertEqual("CANDIDATE_REJECTED", report["status"])
+                if name in expected_diagnostics:
+                    messages = "\n".join(
+                        sample["message"] for sample in report["diagnostics"]["samples"]
+                    )
+                    self.assertIn(expected_diagnostics[name], messages)
 
     def test_seal_rejects_archive_id_path_escape(self) -> None:
         project = self.make_project()

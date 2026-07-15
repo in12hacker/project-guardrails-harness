@@ -5,5 +5,5 @@
   "affected_control_ids": [
     "*"
   ],
-  "summary": "Adds typed AI brownfield readiness context, portable execution Harness candidates, and deterministic task handoff linting without changing the v3 control plane schema."
+  "summary": "Requires typed task readiness, reports unmodeled acquisition without inventing task applicability, and replaces the rejected single-hop proposal with flow/protection DAGs that distinguish committed effects from prevented no-commit outcomes and bind static/failure closure without changing the v3 control plane schema."
 }

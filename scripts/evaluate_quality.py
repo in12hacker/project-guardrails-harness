@@ -257,12 +257,13 @@ def publish_content_addressed_file(
         size = 0
         with tempfile.NamedTemporaryFile(
             prefix=".evidence-", suffix=".tmp", dir=evidence_dir, delete=False,
-        ) as output, source.open("rb") as input_stream:
+        ) as output:
             temporary = Path(output.name)
-            for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
-                output.write(chunk)
-                digest.update(chunk)
-                size += len(chunk)
+            with source.open("rb") as input_stream:
+                for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
+                    output.write(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
             output.flush()
             os.fsync(output.fileno())
         expected_digest = digest.hexdigest()

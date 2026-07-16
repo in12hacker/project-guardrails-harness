@@ -496,6 +496,77 @@ class QualityFrameworkTest(unittest.TestCase):
             )
         self.assertFalse((evidence_dir / wrong_name).exists())
 
+    def test_file_evidence_snapshot_failures_leave_no_partial_objects(self) -> None:
+        module = self.load_script_module("evaluate_quality_failure_fixture", EVALUATE)
+        root = Path(tempfile.mkdtemp(prefix="quality-snapshot-failure-test-"))
+        evidence_dir = root / ".guardrails" / "evidence" / "outputs"
+        missing = root / "missing.bin"
+
+        with self.assertRaises(FileNotFoundError):
+            module.persist_evidence_file(
+                root, evidence_dir, missing, ".artifact.bin",
+            )
+        self.assertEqual([], list(evidence_dir.iterdir()))
+
+        source = root / "stream.bin"
+        source.write_bytes(b"source is replaced by the injected stream")
+        original_open = Path.open
+
+        class FailingStream:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def read(self, _size: int) -> bytes:
+                self.reads += 1
+                if self.reads == 1:
+                    return b"partial snapshot"
+                raise OSError("injected read failure")
+
+        def controlled_open(path: Path, *args, **kwargs):
+            if path == source:
+                return FailingStream()
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", autospec=True, side_effect=controlled_open):
+            with self.assertRaisesRegex(OSError, "injected read failure"):
+                module.persist_evidence_file(
+                    root, evidence_dir, source, ".artifact.bin",
+                )
+        self.assertEqual([], list(evidence_dir.iterdir()))
+
+    def test_create_only_publish_handles_same_and_conflicting_races(self) -> None:
+        module = self.load_script_module("evaluate_quality_race_fixture", EVALUATE)
+        root = Path(tempfile.mkdtemp(prefix="quality-publish-race-test-"))
+        payload = b"race-bound evidence"
+        digest = hashlib.sha256(payload).hexdigest()
+
+        same_temporary = root / "same.tmp"
+        same_destination = root / f"{digest}.artifact.bin"
+        same_temporary.write_bytes(payload)
+        same_destination.write_bytes(payload)
+        module.publish_temporary(
+            same_temporary, same_destination, digest, len(payload),
+        )
+        self.assertFalse(same_temporary.exists())
+        self.assertEqual(payload, same_destination.read_bytes())
+
+        conflict_temporary = root / "conflict.tmp"
+        conflict_destination = root / f"{digest}.conflict.bin"
+        conflict_temporary.write_bytes(payload)
+        conflict_destination.write_bytes(b"conflicting bytes")
+        with self.assertRaisesRegex(OSError, "was modified"):
+            module.publish_temporary(
+                conflict_temporary, conflict_destination, digest, len(payload),
+            )
+        self.assertFalse(conflict_temporary.exists())
+        self.assertEqual(b"conflicting bytes", conflict_destination.read_bytes())
+
     def test_evidence_persistence_rejects_storage_symlink_escape(self) -> None:
         module = self.load_script_module("evaluate_quality_symlink_fixture", EVALUATE)
         root = Path(tempfile.mkdtemp(prefix="quality-storage-root-"))

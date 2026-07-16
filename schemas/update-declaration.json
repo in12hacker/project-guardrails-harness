@@ -5,5 +5,5 @@
   "affected_control_ids": [
     "*"
   ],
-  "summary": "Hardens every v3 control's portable evidence persistence boundary with same-snapshot digest and size binding, canonical diagnostic text, create-only atomic publication, deterministic shared-read POSIX modes, symlink containment, and typed unreadable-evidence failure; active task lint now reads the manifest campaign directly and rejects malformed nesting with typed blockers so a saved candidate cannot become a second revision authority; no compatibility reader or schema change is introduced."
+  "summary": "Hardens every v3 control's portable evidence persistence boundary with same-snapshot digest and size binding, failure-atomic cleanup, create-only race handling, canonical diagnostic text, deterministic shared-read POSIX modes, symlink containment, and typed unreadable-evidence failure; active task lint reads the manifest campaign directly and rejects malformed nesting with typed blockers so a saved candidate cannot become a second revision authority; no compatibility reader or schema change is introduced."
 }

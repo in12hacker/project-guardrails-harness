@@ -174,7 +174,13 @@ def main() -> int:
         registry = load_json_yaml(guardrails / "control-registry.yaml")
         traceability = load_json_yaml(guardrails / "traceability-graph.json")
         if args.active:
-            active = manifest.get("development_policy", {}).get("active_campaign")
+            manifest_object = manifest if isinstance(manifest, dict) else {}
+            development_policy = manifest_object.get("development_policy")
+            active = (
+                development_policy.get("active_campaign")
+                if isinstance(development_policy, dict)
+                else None
+            )
             specification = json.loads(json.dumps(active)) if isinstance(active, dict) else {}
             specification.pop("baseline_binding", None)
         else:

@@ -42,7 +42,9 @@ summary does not establish an independent conclusion.
 Content-addressed evidence is immutable after publication. Writers publish a
 complete temporary file atomically, reject output symlinks and storage paths
 that resolve outside the project, and verify an existing object's digest rather
-than rewriting it. On POSIX, newly created evidence directories use mode `0755`
+than rewriting it. File evidence digest and byte count are computed from that
+same temporary snapshot, never from a separate read of a mutable source. On
+POSIX, newly created evidence directories use mode `0755`
 and newly published evidence files use `0644`, independent of the caller's
 umask. Existing objects are not chmod-repaired during evaluation; unreadable
 objects produce a validation error and require an explicit project-owned

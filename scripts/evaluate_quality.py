@@ -63,6 +63,10 @@ RAW_TRUNCATION_PATTERN = re.compile(
 )
 
 
+class EvidenceBudgetExceeded(OSError):
+    """Raised before publishing evidence that would exceed the active budget."""
+
+
 def digest_file(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
@@ -83,14 +87,17 @@ def artifact_evidence(
         if not path.is_file():
             missing.append(raw)
             continue
-        digest, size = digest_file(path)
-        destination = evidence_dir / f"{digest}.artifact{path.suffix}"
-        additional_bytes = 0 if destination.exists() else size
-        if control_plane_bytes(evidence_dir.parents[1]) + additional_bytes > max_active_bytes:
+        try:
+            evidence_ref, digest, size = persist_evidence_file(
+                root,
+                evidence_dir,
+                path,
+                f".artifact{path.suffix}",
+                guardrails=evidence_dir.parents[1],
+                max_active_bytes=max_active_bytes,
+            )
+        except EvidenceBudgetExceeded:
             return artifacts, missing, f"artifact exceeds active evidence budget: {raw}"
-        evidence_ref, digest, size = persist_evidence_file(
-            root, evidence_dir, path, f".artifact{path.suffix}",
-        )
         artifacts.append({
             "path": raw,
             "evidence_ref": evidence_ref,
@@ -180,10 +187,13 @@ def content_addressed_path(
 
 
 def publish_temporary(
-    temporary: Path, destination: Path, expected_digest: str,
+    temporary: Path, destination: Path, expected_digest: str, expected_size: int,
 ) -> None:
     """Publish complete evidence exactly once and clean up on failure."""
     try:
+        actual_digest, actual_size = digest_file(temporary)
+        if actual_digest != expected_digest or actual_size != expected_size:
+            raise OSError(f"temporary evidence binding mismatch: {temporary}")
         if os.name == "posix":
             temporary.chmod(0o644)
         try:
@@ -206,6 +216,9 @@ def publish_content_addressed_bytes(
 ) -> Path:
     """Atomically publish immutable evidence without following an output symlink."""
     expected_digest = filename.split(".", 1)[0]
+    actual_digest = hashlib.sha256(payload).hexdigest()
+    if actual_digest != expected_digest:
+        raise ValueError("content-addressed filename does not match payload digest")
     path, exists = content_addressed_path(
         root, evidence_dir, filename, expected_digest,
     )
@@ -220,7 +233,7 @@ def publish_content_addressed_bytes(
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        publish_temporary(temporary, path, expected_digest)
+        publish_temporary(temporary, path, expected_digest, len(payload))
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -228,29 +241,46 @@ def publish_content_addressed_bytes(
 
 
 def publish_content_addressed_file(
-    root: Path, evidence_dir: Path, filename: str, source: Path, digest: str,
-) -> Path:
-    """Atomically stream a file into immutable evidence storage."""
-    destination, exists = content_addressed_path(
-        root, evidence_dir, filename, digest,
-    )
-    if exists:
-        return destination
+    root: Path,
+    evidence_dir: Path,
+    source: Path,
+    suffix: str,
+    *,
+    guardrails: Path | None = None,
+    max_active_bytes: int | None = None,
+) -> tuple[Path, str, int]:
+    """Snapshot, bind, and atomically publish immutable file evidence."""
+    ensure_evidence_directory(root, evidence_dir)
     temporary: Path | None = None
     try:
+        digest = hashlib.sha256()
+        size = 0
         with tempfile.NamedTemporaryFile(
-            prefix=f".{filename}.", suffix=".tmp", dir=evidence_dir, delete=False,
+            prefix=".evidence-", suffix=".tmp", dir=evidence_dir, delete=False,
         ) as output, source.open("rb") as input_stream:
             temporary = Path(output.name)
             for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
                 output.write(chunk)
+                digest.update(chunk)
+                size += len(chunk)
             output.flush()
             os.fsync(output.fileno())
-        publish_temporary(temporary, destination, digest)
+        expected_digest = digest.hexdigest()
+        destination, exists = content_addressed_path(
+            root, evidence_dir, f"{expected_digest}{suffix}", expected_digest,
+        )
+        if guardrails is not None and max_active_bytes is not None:
+            current_bytes = control_plane_bytes(guardrails) - temporary.stat().st_size
+            additional_bytes = 0 if exists else size
+            if current_bytes + additional_bytes > max_active_bytes:
+                raise EvidenceBudgetExceeded("active evidence budget exceeded")
+        if not exists:
+            publish_temporary(temporary, destination, expected_digest, size)
+            temporary = None
+        return destination, expected_digest, size
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    return destination
 
 
 def persist_output(root: Path, evidence_dir: Path, text: str) -> tuple[str, str, int]:
@@ -324,11 +354,21 @@ def bounded_redacted_output(text: str) -> tuple[str, bool]:
 
 
 def persist_evidence_file(
-    root: Path, evidence_dir: Path, source: Path, suffix: str,
+    root: Path,
+    evidence_dir: Path,
+    source: Path,
+    suffix: str,
+    *,
+    guardrails: Path | None = None,
+    max_active_bytes: int | None = None,
 ) -> tuple[str, str, int]:
-    digest, size = digest_file(source)
-    destination = publish_content_addressed_file(
-        root, evidence_dir, f"{digest}{suffix}", source, digest,
+    destination, digest, size = publish_content_addressed_file(
+        root,
+        evidence_dir,
+        source,
+        suffix,
+        guardrails=guardrails,
+        max_active_bytes=max_active_bytes,
     )
     return destination.relative_to(root).as_posix(), digest, size
 

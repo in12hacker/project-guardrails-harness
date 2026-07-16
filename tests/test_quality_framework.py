@@ -466,6 +466,36 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertFalse((evidence_dir / f"{failed_digest}.log").exists())
         self.assertFalse(any(evidence_dir.glob(f".{failed_digest}.log.*.tmp")))
 
+    def test_file_evidence_digest_and_size_bind_the_published_snapshot(self) -> None:
+        module = self.load_script_module("evaluate_quality_snapshot_fixture", EVALUATE)
+        root = Path(tempfile.mkdtemp(prefix="quality-snapshot-test-"))
+        source = root / "changing.bin"
+        source.write_bytes(b"snapshot content")
+        evidence_dir = root / ".guardrails" / "evidence" / "outputs"
+        original_digest_file = module.digest_file
+
+        def reject_source_rehash(path: Path) -> tuple[str, int]:
+            if path == source:
+                raise AssertionError("source must be read only by the snapshot stream")
+            return original_digest_file(path)
+
+        with mock.patch.object(module, "digest_file", side_effect=reject_source_rehash):
+            reference, digest, size = module.persist_evidence_file(
+                root, evidence_dir, source, ".artifact.bin",
+            )
+
+        persisted = root / reference
+        self.assertEqual(hashlib.sha256(persisted.read_bytes()).hexdigest(), digest)
+        self.assertEqual(persisted.stat().st_size, size)
+        self.assertEqual(source.read_bytes(), persisted.read_bytes())
+
+        wrong_name = f"{'0' * 64}.log"
+        with self.assertRaisesRegex(ValueError, "does not match payload digest"):
+            module.publish_content_addressed_bytes(
+                root, evidence_dir, wrong_name, b"wrong binding",
+            )
+        self.assertFalse((evidence_dir / wrong_name).exists())
+
     def test_evidence_persistence_rejects_storage_symlink_escape(self) -> None:
         module = self.load_script_module("evaluate_quality_symlink_fixture", EVALUATE)
         root = Path(tempfile.mkdtemp(prefix="quality-storage-root-"))
@@ -682,6 +712,30 @@ class QualityFrameworkTest(unittest.TestCase):
             json.loads(candidate_path.read_text())["revision"],
             payload["campaign"]["revision"],
         )
+
+    def test_active_campaign_lint_types_malformed_manifest_blockers(self) -> None:
+        for malformed in ([], "invalid", None):
+            with self.subTest(development_policy=malformed):
+                project = self.make_project(development_mode="ai_brownfield")
+                manifest_path = project / ".guardrails" / "quality-manifest.yaml"
+                manifest = json.loads(manifest_path.read_text())
+                manifest["development_policy"] = malformed
+                manifest_path.write_text(json.dumps(manifest) + "\n")
+
+                result = subprocess.run(
+                    [
+                        sys.executable, str(LINT_CAMPAIGN),
+                        "--root", str(project), "--active",
+                    ],
+                    check=False, capture_output=True, text=True,
+                )
+
+                self.assertEqual(1, result.returncode, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                payload = json.loads(result.stdout)
+                codes = {item["code"] for item in payload["blocker_details"]}
+                self.assertIn("FRAMEWORK_INVALID", codes)
+                self.assertIn("ACTIVE_CAMPAIGN_MISSING", codes)
 
     def test_campaign_lint_rejects_unclosed_scope_and_unmodeled_acquisition(self) -> None:
         project = self.make_project(development_mode="ai_brownfield")
@@ -3248,6 +3302,9 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual("BLOCKED", control_result["status"])
         self.assertEqual("evidence", control_result["blocker_kind"])
         self.assertIn("exceeds active evidence budget", control_result["detail"])
+        evidence_dir = project / ".guardrails" / "evidence" / "outputs"
+        self.assertEqual([], list(evidence_dir.glob("*.artifact.bin")))
+        self.assertEqual([], list(evidence_dir.glob(".evidence-*.tmp")))
 
     def test_writable_preflight_does_not_create_missing_directory(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="quality-preflight-test-"))

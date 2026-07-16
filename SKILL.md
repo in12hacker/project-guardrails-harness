@@ -82,6 +82,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - Local unprivileged controls run automatically when relevant. Commands are project-owned argv arrays, not fabricated shell strings.
    - Use the evaluator; a non-zero result blocks completion claims.
    - The evaluator serializes concurrent agents with `.guardrails/.ledger.lock`. Every run/audit/claim has a `subject_binding` over the latest non-evidence commit, non-evidence project tree, manifest, registry, traceability, and Skill, plus a separate `storage_binding` over ledger/evidence chain material. Committing only ledger, evidence, or archives must not stale the audited subject.
+   - Persisted diagnostic output is a canonical, redacted review representation: terminal controls and per-line trailing horizontal whitespace are removed, while the full raw stream digest and byte count remain bound in the ledger. New content-addressed evidence is atomically published with deterministic shared-read POSIX modes; existing evidence is never rewritten or silently repaired.
 
    ```bash
    python3 "$SKILL_DIR/scripts/evaluate_quality.py" --root . --run \
@@ -90,7 +91,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    ```
 
 8. **Audit independently**
-   - Self-audit produces raw evidence. Cross-audit uses an independent context and rereads original evidence. Release authority confirms scope/market/release. Regulated profiles add third-party audit.
+   - Self-audit binds the raw stream identity and persists a canonical redacted review representation. Cross-audit uses an independent context and rereads that original persisted evidence. Release authority confirms scope/market/release. Regulated profiles add third-party audit.
    - Disagreement is `DISPUTED`; it cannot be waived into PASS.
    - `cross`, `release_authority`, and `third_party` runs must provide a distinct
      `--authority-id`, a distinct `--execution-context`, and `--review-run` for

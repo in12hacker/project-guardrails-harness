@@ -1636,6 +1636,14 @@ def validate_ledger(ledger: Any, root: Path | None = None) -> list[str]:
     ))
     if ledger.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"evidence ledger schema_version must be {SCHEMA_VERSION}; seal the old plane and regenerate")
+
+    def evidence_digest(path: Path, prefix: str, kind: str) -> str | None:
+        try:
+            return file_sha256(path)
+        except OSError:
+            errors.append(f"{prefix} {kind} cannot be read")
+            return None
+
     runs = ledger.get("runs")
     audits = ledger.get("audits")
     claims = ledger.get("claims")
@@ -1688,8 +1696,10 @@ def validate_ledger(ledger: Any, root: Path | None = None) -> list[str]:
                 if output_path is None or not output_path.is_file():
                     errors.append(f"{prefix}.results[{result_index}] output evidence is missing")
                 else:
-                    digest = file_sha256(output_path)
-                    if digest != output_digest:
+                    digest = evidence_digest(
+                        output_path, f"{prefix}.results[{result_index}]", "output evidence",
+                    )
+                    if digest is not None and digest != output_digest:
                         errors.append(f"{prefix}.results[{result_index}] output evidence digest mismatch")
             debt_observation = result.get("debt_observation")
             if isinstance(debt_observation, dict):
@@ -1701,8 +1711,15 @@ def validate_ledger(ledger: Any, root: Path | None = None) -> list[str]:
                     observation_path = path_inside_root(root, observation_ref)
                     if observation_path is None or not observation_path.is_file():
                         errors.append(f"{prefix}.results[{result_index}] debt observation is missing")
-                    elif file_sha256(observation_path) != observation_digest:
-                        errors.append(f"{prefix}.results[{result_index}] debt observation digest mismatch")
+                    else:
+                        digest = evidence_digest(
+                            observation_path, f"{prefix}.results[{result_index}]",
+                            "debt observation",
+                        )
+                        if digest is not None and digest != observation_digest:
+                            errors.append(
+                                f"{prefix}.results[{result_index}] debt observation digest mismatch"
+                            )
             artifacts = result.get("artifacts", [])
             if not isinstance(artifacts, list):
                 errors.append(f"{prefix}.results[{result_index}].artifacts must be an array")
@@ -1721,10 +1738,19 @@ def validate_ledger(ledger: Any, root: Path | None = None) -> list[str]:
                         evidence_path = path_inside_root(root, artifact["evidence_ref"])
                         if evidence_path is None or not evidence_path.is_file():
                             errors.append(f"{artifact_prefix} immutable evidence is missing")
-                        elif file_sha256(evidence_path) != artifact["sha256"]:
-                            errors.append(f"{artifact_prefix} immutable evidence digest mismatch")
-                        elif evidence_path.stat().st_size != artifact["bytes"]:
-                            errors.append(f"{artifact_prefix} immutable evidence size mismatch")
+                        else:
+                            digest = evidence_digest(
+                                evidence_path, artifact_prefix, "immutable evidence",
+                            )
+                            if digest is not None and digest != artifact["sha256"]:
+                                errors.append(f"{artifact_prefix} immutable evidence digest mismatch")
+                            try:
+                                size = evidence_path.stat().st_size
+                            except OSError:
+                                errors.append(f"{artifact_prefix} immutable evidence cannot be read")
+                            else:
+                                if size != artifact["bytes"]:
+                                    errors.append(f"{artifact_prefix} immutable evidence size mismatch")
     runs_by_id = {
         run.get("run_id"): run for run in runs
         if isinstance(run, dict) and isinstance(run.get("run_id"), str)

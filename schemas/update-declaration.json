@@ -5,5 +5,5 @@
   "affected_control_ids": [
     "*"
   ],
-  "summary": "Hardens every v3 control-plane entrypoint and shared validator so malformed nested framework, campaign, traceability, or ledger input is rejected deterministically before derivation, execution, mutation, or claim; no compatibility reader or schema change is introduced."
+  "summary": "Hardens the portable evidence persistence boundary for every v3 control: canonical redacted diagnostic text prevents whitespace pollution, new content-addressed objects are atomically published with deterministic shared-read POSIX modes, symlink escape is rejected, and unreadable evidence becomes a deterministic validation error; existing evidence remains immutable and no compatibility reader or schema change is introduced."
 }

@@ -26,11 +26,34 @@ require organizational or external signers.
 - a signer cannot override a deterministic failed mandatory control;
 - evidence expires when affected code/config/artifacts change or its explicit
   validity window ends;
-- secrets and sensitive output are redacted before evidence persistence.
+- secrets and sensitive output are redacted before evidence persistence;
+- persisted diagnostic text is canonicalized for review and version control:
+  line endings are normalized, terminal instructions and control characters are
+  removed, and trailing horizontal whitespace is stripped per line;
+- the ledger retains the full raw stream digest and byte count, so canonical
+  review text does not pretend to be the byte-exact raw stream.
 
 Cross-audit re-evaluates the self-audit's original redacted evidence and its
 bindings. Merely rerunning a command under another label or reading only a
 summary does not establish an independent conclusion.
+
+## Evidence Storage Boundary
+
+Content-addressed evidence is immutable after publication. Writers publish a
+complete temporary file atomically, reject output symlinks and storage paths
+that resolve outside the project, and verify an existing object's digest rather
+than rewriting it. On POSIX, newly created evidence directories use mode `0755`
+and newly published evidence files use `0644`, independent of the caller's
+umask. Existing objects are not chmod-repaired during evaluation; unreadable
+objects produce a validation error and require an explicit project-owned
+recovery decision.
+
+The portable Skill owns these persistence invariants, not repository-specific
+artifact names. Each project owns which evidence paths are human-readable text
+and which are byte-exact generated artifacts. A project may classify immutable
+artifact paths with VCS attributes such as `-text -diff`, but must not infer that
+classification merely from a filename or promote project-specific bundle roots
+into the portable Skill.
 
 The executable protocol enforces this with three separate bindings: `actor` is
 only a display label, `authority_id` identifies a manifest-registered responsible authority, and

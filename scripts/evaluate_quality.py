@@ -10,7 +10,6 @@ import json
 import os
 import platform
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -102,13 +101,14 @@ def artifact_evidence(
 
 
 def normalize_terminal_text(text: str) -> str:
-    """Remove terminal instructions while preserving readable diagnostic text."""
+    """Canonicalize terminal output while preserving readable diagnostic text."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = OSC_ESCAPE_PATTERN.sub("", text)
     text = STRING_ESCAPE_PATTERN.sub("", text)
     text = CSI_ESCAPE_PATTERN.sub("", text)
     text = SINGLE_ESCAPE_PATTERN.sub("", text)
-    return CONTROL_CHARACTER_PATTERN.sub("", text)
+    text = CONTROL_CHARACTER_PATTERN.sub("", text)
+    return "\n".join(line.rstrip(" \t") for line in text.split("\n"))
 
 
 def redact_text(text: str, root: Path) -> str:
@@ -137,16 +137,129 @@ def redact_output(raw: bytes, root: Path) -> str:
     return redact_text(text, root)
 
 
+def ensure_evidence_directory(root: Path, evidence_dir: Path) -> None:
+    """Create an in-project evidence directory with deterministic new-path modes."""
+    resolved_root = root.resolve()
+    try:
+        evidence_dir.resolve(strict=False).relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"evidence directory escapes project root: {evidence_dir}") from exc
+
+    missing: list[Path] = []
+    candidate = evidence_dir
+    while not candidate.exists():
+        if candidate.is_symlink():
+            raise OSError(f"evidence directory contains a dangling symlink: {candidate}")
+        missing.append(candidate)
+        if candidate == root or candidate.parent == candidate:
+            break
+        candidate = candidate.parent
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        for created in reversed(missing):
+            created.chmod(0o755)
+
+
+def content_addressed_path(
+    root: Path, evidence_dir: Path, filename: str, expected_digest: str,
+) -> tuple[Path, bool]:
+    """Return a safe evidence destination and whether valid content exists."""
+    ensure_evidence_directory(root, evidence_dir)
+    path = evidence_dir / filename
+    if path.is_symlink():
+        raise OSError(f"content-addressed evidence cannot be a symlink: {path}")
+    try:
+        path.resolve(strict=False).relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"evidence path escapes project root: {path}") from exc
+    if not path.exists():
+        return path, False
+    if not path.is_file() or digest_file(path)[0] != expected_digest:
+        raise OSError(f"content-addressed evidence was modified: {path}")
+    return path, True
+
+
+def publish_temporary(
+    temporary: Path, destination: Path, expected_digest: str,
+) -> None:
+    """Publish complete evidence exactly once and clean up on failure."""
+    try:
+        if os.name == "posix":
+            temporary.chmod(0o644)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            if (
+                destination.is_symlink()
+                or not destination.is_file()
+                or digest_file(destination)[0] != expected_digest
+            ):
+                raise OSError(
+                    f"content-addressed evidence was modified: {destination}"
+                ) from None
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def publish_content_addressed_bytes(
+    root: Path, evidence_dir: Path, filename: str, payload: bytes,
+) -> Path:
+    """Atomically publish immutable evidence without following an output symlink."""
+    expected_digest = filename.split(".", 1)[0]
+    path, exists = content_addressed_path(
+        root, evidence_dir, filename, expected_digest,
+    )
+    if exists:
+        return path
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{filename}.", suffix=".tmp", dir=evidence_dir, delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        publish_temporary(temporary, path, expected_digest)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return path
+
+
+def publish_content_addressed_file(
+    root: Path, evidence_dir: Path, filename: str, source: Path, digest: str,
+) -> Path:
+    """Atomically stream a file into immutable evidence storage."""
+    destination, exists = content_addressed_path(
+        root, evidence_dir, filename, digest,
+    )
+    if exists:
+        return destination
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{filename}.", suffix=".tmp", dir=evidence_dir, delete=False,
+        ) as output, source.open("rb") as input_stream:
+            temporary = Path(output.name)
+            for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        publish_temporary(temporary, destination, digest)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return destination
+
+
 def persist_output(root: Path, evidence_dir: Path, text: str) -> tuple[str, str, int]:
-    """Persist redacted output by digest and return its project-relative reference."""
+    """Persist canonical redacted output and return its project-relative reference."""
     payload = text.encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    path = evidence_dir / f"{digest}.log"
-    if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-        raise OSError(f"content-addressed evidence was modified: {path}")
-    if not path.exists():
-        path.write_bytes(payload)
+    path = publish_content_addressed_bytes(
+        root, evidence_dir, f"{digest}.log", payload,
+    )
     reference = path.relative_to(root).as_posix()
     return reference, digest, len(payload)
 
@@ -214,14 +327,9 @@ def persist_evidence_file(
     root: Path, evidence_dir: Path, source: Path, suffix: str,
 ) -> tuple[str, str, int]:
     digest, size = digest_file(source)
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    destination = evidence_dir / f"{digest}{suffix}"
-    if destination.exists():
-        existing_digest, _ = digest_file(destination)
-        if existing_digest != digest:
-            raise OSError(f"content-addressed evidence was modified: {destination}")
-    else:
-        shutil.copyfile(source, destination)
+    destination = publish_content_addressed_file(
+        root, evidence_dir, f"{digest}{suffix}", source, digest,
+    )
     return destination.relative_to(root).as_posix(), digest, size
 
 

@@ -417,6 +417,101 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         self.assertEqual(task.returncode, 0, task.stderr)
 
+    def test_evidence_persistence_is_canonical_atomic_and_portable(self) -> None:
+        module = self.load_script_module("evaluate_quality_storage_fixture", EVALUATE)
+        root = Path(tempfile.mkdtemp(prefix="quality-storage-test-"))
+        evidence_dir = root / ".guardrails" / "evidence" / "nested" / "outputs"
+        canonical = module.normalize_terminal_text(
+            "alpha  \r\nbeta\t \r\ngamma\t\ninternal\tvalue  \n",
+        )
+        self.assertEqual("alpha\nbeta\ngamma\ninternal\tvalue\n", canonical)
+
+        previous_umask = os.umask(0o077)
+        try:
+            output_ref, output_digest, output_size = module.persist_output(
+                root, evidence_dir, canonical,
+            )
+            source = root / "report.bin"
+            source.write_bytes(b"immutable artifact\x00")
+            source.chmod(0o600)
+            with mock.patch.object(
+                Path, "read_bytes", side_effect=AssertionError("artifact must stream"),
+            ):
+                artifact_ref, artifact_digest, artifact_size = module.persist_evidence_file(
+                    root, evidence_dir, source, ".artifact.bin",
+                )
+        finally:
+            os.umask(previous_umask)
+
+        output_path = root / output_ref
+        artifact_path = root / artifact_ref
+        self.assertEqual(output_digest, hashlib.sha256(output_path.read_bytes()).hexdigest())
+        self.assertEqual(output_size, output_path.stat().st_size)
+        self.assertEqual(artifact_digest, hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertEqual(artifact_size, artifact_path.stat().st_size)
+        if os.name == "posix":
+            self.assertEqual(0o644, output_path.stat().st_mode & 0o777)
+            self.assertEqual(0o644, artifact_path.stat().st_mode & 0o777)
+            for directory in (
+                root / ".guardrails", root / ".guardrails" / "evidence",
+                root / ".guardrails" / "evidence" / "nested", evidence_dir,
+            ):
+                self.assertEqual(0o755, directory.stat().st_mode & 0o777)
+
+        failed_text = "atomic failure"
+        failed_digest = hashlib.sha256(failed_text.encode()).hexdigest()
+        with mock.patch.object(module.os, "link", side_effect=OSError("injected")):
+            with self.assertRaisesRegex(OSError, "injected"):
+                module.persist_output(root, evidence_dir, failed_text)
+        self.assertFalse((evidence_dir / f"{failed_digest}.log").exists())
+        self.assertFalse(any(evidence_dir.glob(f".{failed_digest}.log.*.tmp")))
+
+    def test_evidence_persistence_rejects_storage_symlink_escape(self) -> None:
+        module = self.load_script_module("evaluate_quality_symlink_fixture", EVALUATE)
+        root = Path(tempfile.mkdtemp(prefix="quality-storage-root-"))
+        external = Path(tempfile.mkdtemp(prefix="quality-storage-external-"))
+        evidence_parent = root / ".guardrails" / "evidence"
+        evidence_parent.mkdir(parents=True)
+        escaped = evidence_parent / "outputs"
+        escaped.symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "escapes project root"):
+            module.persist_output(root, escaped, "must stay local")
+        self.assertEqual([], list(external.iterdir()))
+
+    def test_unreadable_evidence_is_a_validation_error(self) -> None:
+        project = self.make_project()
+        registry_path = project / ".guardrails" / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        control = registry["controls"][0]
+        control["execution"] = {
+            "type": "command",
+            "command": [sys.executable, "-c", "print('evidence')"],
+            "cwd": ".", "timeout_seconds": 10, "authorization_required": False,
+        }
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        sync = subprocess.run(
+            [sys.executable, str(SYNC), "--root", str(project)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(sync.returncode, 0, sync.stderr)
+        run = self.run_evaluator(project, "--run", "--control", control["id"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        ledger = json.loads(
+            (project / ".guardrails" / "evidence-ledger.json").read_text()
+        )
+        output_path = project / ledger["runs"][-1]["results"][0]["output_ref"]
+        common = self.load_quality_common()
+        original = common.file_sha256
+
+        def unreadable(path: Path) -> str:
+            if path == output_path:
+                raise PermissionError("injected unreadable evidence")
+            return original(path)
+
+        with mock.patch.object(common, "file_sha256", side_effect=unreadable):
+            errors = common.validate_ledger(ledger, project)
+        self.assertIn("runs[0].results[0] output evidence cannot be read", errors)
+
     def test_subset_run_cannot_satisfy_full_claim(self) -> None:
         project = self.make_project()
         control_id = "QF.FRAMEWORK.MANIFEST"

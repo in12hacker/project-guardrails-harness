@@ -32,7 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".")
     parser.add_argument("--guardrails-dir", default=".guardrails")
-    parser.add_argument("--campaign", required=True, help="JSON campaign specification")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--campaign", help="candidate JSON campaign specification")
+    source.add_argument(
+        "--active", action="store_true",
+        help="lint the manifest's registered active campaign",
+    )
     parser.add_argument("--phase-id")
     parser.add_argument("--task-id")
     parser.add_argument(
@@ -168,7 +173,12 @@ def main() -> int:
         manifest = load_json_yaml(guardrails / "quality-manifest.yaml")
         registry = load_json_yaml(guardrails / "control-registry.yaml")
         traceability = load_json_yaml(guardrails / "traceability-graph.json")
-        specification = json.loads(Path(args.campaign).read_text(encoding="utf-8"))
+        if args.active:
+            active = manifest.get("development_policy", {}).get("active_campaign")
+            specification = json.loads(json.dumps(active)) if isinstance(active, dict) else {}
+            specification.pop("baseline_binding", None)
+        else:
+            specification = json.loads(Path(args.campaign).read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return emit({
             "status": "CAMPAIGN_LINT_ERROR",
@@ -194,6 +204,11 @@ def main() -> int:
         blockers.append(blocker(
             "DEVELOPMENT_MODE_MISMATCH", "campaign",
             "campaigns are valid only for ai_brownfield projects",
+        ))
+    if args.active and not specification:
+        blockers.append(blocker(
+            "ACTIVE_CAMPAIGN_MISSING", "campaign",
+            "the quality manifest has no registered active campaign",
         ))
     if not isinstance(specification, dict):
         blockers.append(blocker(
@@ -313,6 +328,7 @@ def main() -> int:
             "revision": specification.get("revision"),
             "phase_id": args.phase_id,
             "task_id": args.task_id,
+            "source": "active_manifest" if args.active else "candidate_file",
         },
         "blocker_details": blockers,
         "advisories": advisories,

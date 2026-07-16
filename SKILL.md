@@ -60,6 +60,10 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      the task. The v3 linter then returns a typed modeling blocker instead of
      inventing authorization. Campaign lint is read-only structural preflight,
      not control evidence or readiness.
+   - `--campaign` lints a candidate input only. After registration, task work
+     must use `lint_campaign.py --active --phase-id ... --task-id ...`; the
+     manifest's active campaign is the sole task authority. Never use a saved
+     candidate file as a second active revision source.
 
 4. **Ingest existing truth before adding controls**
    - Read existing instruction files, CI, build targets, test registries, fitness runners, release workflows, contracts, and operations docs.

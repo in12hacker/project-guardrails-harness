@@ -623,6 +623,66 @@ class QualityFrameworkTest(unittest.TestCase):
         }
         self.assertEqual(before, after)
 
+    def test_active_campaign_lint_uses_only_registered_manifest_revision(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        missing = subprocess.run(
+            [sys.executable, str(LINT_CAMPAIGN), "--root", str(project), "--active"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, missing.returncode, missing.stderr)
+        self.assertIn(
+            "ACTIVE_CAMPAIGN_MISSING",
+            {item["code"] for item in json.loads(missing.stdout)["blocker_details"]},
+        )
+
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        exit_policy = {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 0,
+            "allow_open_cleanup_debt": True,
+        }
+        specification = {
+            "id": "ACTIVE-LINT", "revision": 7,
+            "target_maturity": "prototype", "assessed_scope": ["."],
+            "owner": "quality",
+            "phases": [{
+                "id": "PHASE-1", "title": "Registered contract",
+                "affected_control_ids": [control_id], "assessed_scope": ["."],
+                "exit_policy": exit_policy,
+                "tasks": [{
+                    "id": "TASK-1", "kind": "framework_adoption",
+                    "affected_control_ids": [control_id], "assessed_scope": ["."],
+                    "exit_policy": exit_policy,
+                }],
+            }],
+        }
+        registered = self.register_campaign(project, specification)
+        self.assertEqual(0, registered.returncode, registered.stderr)
+
+        stale_candidate = copy.deepcopy(specification)
+        stale_candidate["revision"] = 6
+        candidate_path = project.parent / f"{project.name}-stale-candidate.json"
+        candidate_path.write_text(json.dumps(stale_candidate) + "\n")
+        active = subprocess.run(
+            [
+                sys.executable, str(LINT_CAMPAIGN), "--root", str(project),
+                "--active", "--phase-id", "PHASE-1", "--task-id", "TASK-1",
+                "--require-control", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, active.returncode, active.stdout + active.stderr)
+        payload = json.loads(active.stdout)
+        self.assertEqual("active_manifest", payload["campaign"]["source"])
+        self.assertEqual(7, payload["campaign"]["revision"])
+        self.assertNotEqual(
+            json.loads(candidate_path.read_text())["revision"],
+            payload["campaign"]["revision"],
+        )
+
     def test_campaign_lint_rejects_unclosed_scope_and_unmodeled_acquisition(self) -> None:
         project = self.make_project(development_mode="ai_brownfield")
         registry = json.loads(

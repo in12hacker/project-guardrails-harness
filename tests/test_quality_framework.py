@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -19,6 +20,7 @@ EVALUATE = ROOT / "scripts" / "evaluate_quality.py"
 SCAN = ROOT / "scripts" / "scan_project.py"
 SYNC = ROOT / "scripts" / "sync_traceability.py"
 REGISTER = ROOT / "scripts" / "register_campaign.py"
+LINT_CAMPAIGN = ROOT / "scripts" / "lint_campaign.py"
 REVIEW_UPDATE = ROOT / "scripts" / "review_skill_update.py"
 READINESS = ROOT / "scripts" / "assess_readiness.py"
 HARNESS_CANDIDATE = ROOT / "scripts" / "validate_harness_candidate.py"
@@ -126,6 +128,19 @@ class QualityFrameworkTest(unittest.TestCase):
             [
                 sys.executable, str(REGISTER), "--root", str(project),
                 "--campaign", str(campaign_path),
+            ],
+            check=False, capture_output=True, text=True,
+        )
+
+    def lint_campaign(
+        self, project: Path, specification: dict, *args: str,
+    ) -> subprocess.CompletedProcess[str]:
+        campaign_path = project.parent / f"{project.name}-campaign-lint.json"
+        campaign_path.write_text(json.dumps(specification, indent=2) + "\n")
+        return subprocess.run(
+            [
+                sys.executable, str(LINT_CAMPAIGN), "--root", str(project),
+                "--campaign", str(campaign_path), *args,
             ],
             check=False, capture_output=True, text=True,
         )
@@ -455,6 +470,546 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         self.assertEqual(task.returncode, 1)
         self.assertIn("require an active campaign", task.stderr)
+
+    def test_campaign_lint_proves_task_scope_requirements_without_writes(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        exit_policy = {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 0,
+            "allow_open_cleanup_debt": True,
+        }
+        campaign = {
+            "id": "LINT-CAMPAIGN", "revision": 1,
+            "target_maturity": "prototype",
+            "assessed_scope": ["component", ".guardrails"],
+            "owner": "quality",
+            "phases": [{
+                "id": "PHASE-1", "title": "Closed task contract",
+                "affected_control_ids": [control_id],
+                "assessed_scope": ["component", ".guardrails"],
+                "exit_policy": exit_policy,
+                "tasks": [{
+                    "id": "TASK-1", "kind": "framework_adoption",
+                    "affected_control_ids": [control_id],
+                    "assessed_scope": ["component/src", ".guardrails/DEV-REPORT.md"],
+                    "exit_policy": exit_policy,
+                }],
+            }],
+        }
+        guardrails = project / ".guardrails"
+        before = {
+            path.relative_to(guardrails).as_posix(): path.read_bytes()
+            for path in guardrails.rglob("*") if path.is_file()
+        }
+        result = self.lint_campaign(
+            project, campaign,
+            "--phase-id", "PHASE-1", "--task-id", "TASK-1",
+            "--require-path", ".guardrails/DEV-REPORT.md",
+            "--require-control", control_id,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual("CAMPAIGN_LINT_OK", payload["status"])
+        self.assertFalse(payload["writes_performed"])
+        self.assertFalse(payload["controls_executed"])
+        self.assertFalse(payload["claim_supported"])
+        self.assertEqual([], payload["blocker_details"])
+        self.assertEqual(
+            [".guardrails/DEV-REPORT.md"],
+            payload["task_contract"]["required_paths"],
+        )
+        after = {
+            path.relative_to(guardrails).as_posix(): path.read_bytes()
+            for path in guardrails.rglob("*") if path.is_file()
+        }
+        self.assertEqual(before, after)
+
+    def test_campaign_lint_rejects_unclosed_scope_and_unmodeled_acquisition(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        exit_policy = {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 0,
+            "allow_open_cleanup_debt": True,
+        }
+
+        def campaign(task_scope: list[str]) -> dict:
+            return {
+                "id": "LINT-BLOCKED", "revision": 1,
+                "target_maturity": "prototype", "assessed_scope": ["component"],
+                "owner": "quality",
+                "phases": [{
+                    "id": "PHASE-1", "title": "Scope boundary",
+                    "affected_control_ids": [control_id],
+                    "assessed_scope": ["component"], "exit_policy": exit_policy,
+                    "tasks": [{
+                        "id": "TASK-1", "kind": "framework_adoption",
+                        "affected_control_ids": [control_id],
+                        "assessed_scope": task_scope, "exit_policy": exit_policy,
+                    }],
+                }],
+            }
+
+        outside = self.lint_campaign(project, campaign(["outside"]))
+        self.assertEqual(1, outside.returncode)
+        outside_payload = json.loads(outside.stdout)
+        self.assertIn(
+            "CAMPAIGN_STRUCTURE_INVALID",
+            {item["code"] for item in outside_payload["blocker_details"]},
+        )
+        registered = self.register_campaign(project, campaign(["outside"]))
+        self.assertEqual(2, registered.returncode)
+        self.assertIn("outside", registered.stderr)
+
+        acquisition = self.lint_campaign(
+            project, campaign(["component/src"]),
+            "--phase-id", "PHASE-1", "--task-id", "TASK-1",
+            "--require-path", "component/report.md",
+            "--require-product-acquisition",
+        )
+        self.assertEqual(1, acquisition.returncode)
+        payload = json.loads(acquisition.stdout)
+        codes = {item["code"] for item in payload["blocker_details"]}
+        self.assertIn("REQUIRED_PATH_OUTSIDE_TASK_SCOPE", codes)
+        self.assertIn("PRODUCT_ACQUISITION_CAPABILITIES_UNMODELED", codes)
+
+    def test_registry_validation_reports_malformed_collections_without_raising(self) -> None:
+        module = self.load_quality_common()
+        project = self.make_project()
+        guardrails = project / ".guardrails"
+        registry = json.loads((guardrails / "control-registry.yaml").read_text())
+        traceability = json.loads((guardrails / "traceability-graph.json").read_text())
+
+        for collection in (
+            "capabilities", "baselines", "cleanup_debts",
+            "design_scope_exemptions", "federated_rule_mappings",
+        ):
+            with self.subTest(collection=collection):
+                malformed = json.loads(json.dumps(registry))
+                malformed[collection] = None
+                errors = module.validate_registry(malformed)
+                self.assertIn(
+                    f"control registry {collection} must be an array",
+                    errors,
+                )
+                self.assertIsInstance(
+                    module.validate_traceability(traceability, malformed), list,
+                )
+
+        malformed = json.loads(json.dumps(registry))
+        malformed["controls"] = [None, {
+            "evaluation_mode": "ratchet_delta",
+            "ratchet_policy": None,
+        }]
+        errors = module.validate_registry(malformed)
+        self.assertIn("controls[0] must be an object", errors)
+        self.assertIn(
+            "controls[1].ratchet_policy.baseline_ref references an unknown baseline",
+            errors,
+        )
+        self.assertIsInstance(
+            module.validate_traceability(traceability, malformed), list,
+        )
+        malformed_traceability = json.loads(json.dumps(traceability))
+        malformed_traceability["links"] = [{"control_id": {}}]
+        self.assertIn(
+            "traceability links[0].control_id is required",
+            module.validate_traceability(malformed_traceability, registry),
+        )
+        self.assertEqual(
+            ["quality manifest must be an object"],
+            module.validate_manifest(None),
+        )
+        self.assertEqual(
+            ["control registry must be an object"],
+            module.validate_registry(None),
+        )
+        self.assertEqual(
+            ["traceability graph must be an object"],
+            module.validate_traceability(None, registry),
+        )
+        self.assertEqual(
+            ["evidence ledger must be an object"],
+            module.validate_ledger(None),
+        )
+
+    def test_campaign_lint_fails_closed_for_malformed_framework_roots(self) -> None:
+        for filename in (
+            "quality-manifest.yaml", "control-registry.yaml",
+            "traceability-graph.json",
+        ):
+            with self.subTest(filename=filename):
+                project = self.make_project(development_mode="ai_brownfield")
+                guardrails = project / ".guardrails"
+                registry = json.loads((guardrails / "control-registry.yaml").read_text())
+                control_id = registry["controls"][0]["id"]
+                exit_policy = {
+                    "max_new_violations": 0,
+                    "minimum_fixed_violations": 0,
+                    "allow_open_cleanup_debt": True,
+                }
+                campaign = {
+                    "id": "ROOT-SHAPE", "revision": 1,
+                    "target_maturity": "prototype", "assessed_scope": ["."],
+                    "owner": "quality",
+                    "phases": [{
+                        "id": "PHASE-1", "title": "Root shape",
+                        "affected_control_ids": [control_id], "assessed_scope": ["."],
+                        "exit_policy": exit_policy,
+                        "tasks": [{
+                            "id": "TASK-1", "kind": "framework_adoption",
+                            "affected_control_ids": [control_id], "assessed_scope": ["."],
+                            "exit_policy": exit_policy,
+                        }],
+                    }],
+                }
+                (guardrails / filename).write_text("null\n", encoding="utf-8")
+
+                result = self.lint_campaign(project, campaign)
+
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertEqual("", result.stderr)
+                self.assertNotIn("Traceback", result.stdout)
+                payload = json.loads(result.stdout)
+                self.assertEqual("CAMPAIGN_LINT_ERROR", payload["status"])
+                self.assertIn(
+                    "INPUT_UNAVAILABLE",
+                    {item["code"] for item in payload["blocker_details"]},
+                )
+
+    def test_campaign_lint_returns_typed_blockers_for_malformed_nested_input(self) -> None:
+        exit_policy = {
+            "max_new_violations": 0,
+            "minimum_fixed_violations": 0,
+            "allow_open_cleanup_debt": True,
+        }
+
+        for case in (
+            "phases_none", "task_arrays_none", "control_without_id", "controls_none",
+            "capabilities_none", "capability_id_object", "command_nested_array",
+            "baseline_control_object",
+        ):
+            with self.subTest(case=case):
+                project = self.make_project(development_mode="ai_brownfield")
+                registry_path = project / ".guardrails" / "control-registry.yaml"
+                registry = json.loads(registry_path.read_text())
+                control_id = registry["controls"][0]["id"]
+                campaign = {
+                    "id": "MALFORMED-CAMPAIGN", "revision": 1,
+                    "target_maturity": "prototype", "assessed_scope": ["component"],
+                    "owner": "quality",
+                    "phases": [{
+                        "id": "PHASE-1", "title": "Malformed fixture",
+                        "affected_control_ids": [control_id],
+                        "assessed_scope": ["component"], "exit_policy": exit_policy,
+                        "tasks": [{
+                            "id": "TASK-1", "kind": "framework_adoption",
+                            "affected_control_ids": [control_id],
+                            "assessed_scope": ["component/src"],
+                            "exit_policy": exit_policy,
+                        }],
+                    }],
+                }
+                if case == "phases_none":
+                    campaign["phases"] = None
+                elif case == "task_arrays_none":
+                    campaign["phases"][0]["tasks"][0]["affected_control_ids"] = None
+                    campaign["phases"][0]["tasks"][0]["assessed_scope"] = None
+                elif case == "control_without_id":
+                    registry["controls"] = [{}]
+                    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+                elif case == "controls_none":
+                    registry["controls"] = None
+                    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+                elif case == "capabilities_none":
+                    registry["capabilities"] = None
+                    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+                elif case == "capability_id_object":
+                    registry["capabilities"].append({
+                        "id": {}, "owner": "quality", "authorization_required": False,
+                        "preflight": {
+                            "command": ["true"], "cwd": ".", "timeout_seconds": 1,
+                        },
+                    })
+                    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+                elif case == "command_nested_array":
+                    registry["controls"][0]["execution"]["command"] = [[], "x"]
+                    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+                elif case == "baseline_control_object":
+                    registry["baselines"].append({
+                        "id": "MALFORMED-BASELINE", "control_id": {}, "revision": 1,
+                        "source_ref": "baseline.json", "source_sha256": "0" * 64,
+                        "violation_count": 0,
+                    })
+                    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+
+                result = self.lint_campaign(
+                    project, campaign,
+                    "--phase-id", "PHASE-1", "--task-id", "TASK-1",
+                )
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertEqual("", result.stderr)
+                self.assertNotIn("Traceback", result.stdout)
+                payload = json.loads(result.stdout)
+                self.assertEqual("CAMPAIGN_LINT_BLOCKED", payload["status"])
+                codes = {item["code"] for item in payload["blocker_details"]}
+                expected = (
+                    "FRAMEWORK_INVALID"
+                    if case not in {"phases_none", "task_arrays_none"}
+                    else "CAMPAIGN_STRUCTURE_INVALID"
+                )
+                self.assertIn(expected, codes)
+
+    def test_control_plane_entrypoints_fail_closed_for_non_array_controls(self) -> None:
+        project = self.make_project(development_mode="ai_brownfield")
+        guardrails = project / ".guardrails"
+        registry_path = guardrails / "control-registry.yaml"
+        registry = json.loads(registry_path.read_text())
+        registry["controls"] = None
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+        campaign_path = project / "campaign.json"
+        campaign_path.write_text("{}\n", encoding="utf-8")
+        core_files = (
+            "quality-manifest.yaml", "control-registry.yaml",
+            "evidence-ledger.json", "traceability-graph.json",
+        )
+        before = {name: (guardrails / name).read_bytes() for name in core_files}
+        commands = {
+            "readiness": [sys.executable, str(READINESS), "--root", str(project)],
+            "evaluate": [
+                sys.executable, str(EVALUATE), "--root", str(project), "--dry-run",
+            ],
+            "register": [
+                sys.executable, str(REGISTER), "--root", str(project),
+                "--campaign", str(campaign_path),
+            ],
+            "review": [
+                sys.executable, str(REVIEW_UPDATE), "--root", str(project), "--check",
+            ],
+            "seal": [
+                sys.executable, str(SEAL), "--root", str(project),
+                "--archive-id", "malformed-registry-fixture",
+            ],
+            "lint": [
+                sys.executable, str(LINT_CAMPAIGN), "--root", str(project),
+                "--campaign", str(campaign_path),
+            ],
+            "handoff": [
+                sys.executable, str(HANDOFF), "--root", str(project),
+                "--campaign-id", "MALFORMED", "--campaign-revision", "1",
+                "--phase-id", "PHASE-1", "--task-id", "TASK-1", "--check",
+            ],
+        }
+        diagnostic_markers = {
+            "readiness": '"status": "BLOCKED"',
+            "evaluate": "FAIL [QF-FRAMEWORK]",
+            "register": "FAIL [QF-FRAMEWORK]",
+            "review": '"status": "error"',
+            "seal": "cannot seal invalid active control plane",
+            "lint": '"status": "CAMPAIGN_LINT_BLOCKED"',
+            "handoff": '"status": "HANDOFF_ERROR"',
+        }
+        for name, command in commands.items():
+            with self.subTest(entrypoint=name):
+                result = subprocess.run(
+                    command, check=False, capture_output=True, text=True,
+                )
+                combined = result.stdout + result.stderr
+                self.assertNotEqual(0, result.returncode, combined)
+                self.assertNotIn("Traceback", combined)
+                self.assertTrue(combined.strip())
+                self.assertIn(diagnostic_markers[name], combined)
+        after = {name: (guardrails / name).read_bytes() for name in core_files}
+        self.assertEqual(before, after)
+        self.assertFalse((guardrails / "archive" / "malformed-registry-fixture").exists())
+        self.assertFalse((guardrails / "evidence" / "task-handoff.md").exists())
+
+    def test_shared_validators_reject_nested_json_shape_mutations_without_raising(self) -> None:
+        project = self.make_project()
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        for stage in ("self", "cross", "release_authority"):
+            result = self.run_evaluator(
+                project, "--run", "--audit-stage", stage,
+                "--actor", f"shape-fixture-{stage}", "--control", control_id,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+        claim = self.run_evaluator(
+            project, "--claim", "--claim-scope", "task", "--control", control_id,
+        )
+        self.assertEqual(0, claim.returncode, claim.stderr)
+
+        module = self.load_quality_common()
+        guardrails = project / ".guardrails"
+        documents = {
+            name: json.loads((guardrails / name).read_text())
+            for name in (
+                "quality-manifest.yaml", "control-registry.yaml",
+                "traceability-graph.json", "evidence-ledger.json",
+            )
+        }
+        registry = documents["control-registry.yaml"]
+        control_ids = module.registry_control_ids(registry)
+        validators = {
+            "quality-manifest.yaml": lambda value: module.validate_manifest(
+                value, control_ids,
+            ),
+            "control-registry.yaml": module.validate_registry,
+            "traceability-graph.json": lambda value: module.validate_traceability(
+                value, registry,
+            ),
+            "evidence-ledger.json": lambda value: module.validate_ledger(value, project),
+        }
+
+        def nested_paths(value, path=()):
+            if path:
+                yield path
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    yield from nested_paths(child, (*path, key))
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    yield from nested_paths(child, (*path, index))
+
+        def shape_mutation(value, path):
+            candidate = copy.deepcopy(value)
+            parent = candidate
+            for part in path[:-1]:
+                parent = parent[part]
+            current = parent[path[-1]]
+            parent[path[-1]] = None if isinstance(current, (dict, list)) else {}
+            return candidate
+
+        for name, document in documents.items():
+            validator = validators[name]
+            paths = list(nested_paths(document))
+            self.assertTrue(paths)
+            for path in paths:
+                with self.subTest(document=name, path=path):
+                    errors = validator(shape_mutation(document, path))
+                    self.assertTrue(errors, f"mutation was accepted: {name}:{path}")
+
+    def test_json_integer_and_execution_contracts_fail_closed(self) -> None:
+        module = self.load_quality_common()
+        project = self.make_project(development_mode="ai_brownfield")
+        guardrails = project / ".guardrails"
+        registry = json.loads((guardrails / "control-registry.yaml").read_text())
+
+        file_control = copy.deepcopy(registry)
+        file_control["controls"][0]["execution"].pop("path")
+        self.assertIn(
+            "controls[0].execution.path is required for file path controls",
+            module.validate_registry(file_control),
+        )
+
+        command_timeout = copy.deepcopy(registry)
+        command_timeout["controls"][0]["execution"] = {
+            "type": "command", "command": ["true"],
+            "timeout_seconds": True, "authorization_required": False,
+        }
+        self.assertIn(
+            "controls[0].execution.timeout_seconds is invalid",
+            module.validate_registry(command_timeout),
+        )
+
+        capability_timeout = copy.deepcopy(registry)
+        capability_timeout["capabilities"].append({
+            "id": "fixture", "owner": "quality", "authorization_required": False,
+            "preflight": {
+                "command": ["true"], "cwd": ".", "timeout_seconds": True,
+            },
+        })
+        self.assertIn(
+            "capabilities[0].preflight.timeout_seconds is invalid",
+            module.validate_registry(capability_timeout),
+        )
+
+        baseline = copy.deepcopy(registry)
+        baseline["baselines"].append({
+            "id": "FIXTURE", "control_id": registry["controls"][0]["id"],
+            "revision": True, "source_ref": "baseline.json",
+            "source_sha256": "0" * 64, "violation_count": False,
+        })
+        baseline_errors = module.validate_registry(baseline)
+        self.assertIn("baselines[0].revision must be an integer >= 1", baseline_errors)
+        self.assertIn(
+            "baselines[0].violation_count must be a non-negative integer",
+            baseline_errors,
+        )
+
+        exit_errors = module.validate_exit_policy({
+            "max_new_violations": True,
+            "minimum_fixed_violations": False,
+            "allow_open_cleanup_debt": True,
+        }, "exit")
+        self.assertIn("exit.max_new_violations must be a non-negative integer", exit_errors)
+        self.assertIn("exit.minimum_fixed_violations must be a non-negative integer", exit_errors)
+        self.assertIsNone(module.selected_source_sha256(
+            project / "README.md",
+            {"kind": "markdown_heading", "value": "# Fixture", "occurrence": True},
+        ))
+
+        traceability = json.loads(
+            (guardrails / "traceability-graph.json").read_text()
+        )
+        traceability["links"][0]["requirement_ids"] = ["REQ.FORGED"]
+        self.assertIn(
+            "traceability graph content does not match the control registry",
+            module.validate_traceability(traceability, registry),
+        )
+
+        campaign_path = project / "malformed-campaign.json"
+        for revision in (True, {}):
+            with self.subTest(campaign_revision=revision):
+                campaign_path.write_text(json.dumps({"revision": revision}) + "\n")
+                result = subprocess.run(
+                    [
+                        sys.executable, str(REGISTER), "--root", str(project),
+                        "--campaign", str(campaign_path),
+                    ],
+                    check=False, capture_output=True, text=True,
+                )
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                self.assertIn("campaign revision must be an integer", result.stderr)
+
+    def test_update_and_predecessor_metadata_reject_object_enums(self) -> None:
+        review_module = self.load_script_module(
+            "review_skill_update_enum_fixture", REVIEW_UPDATE,
+        )
+        declaration = Path(tempfile.mkdtemp()) / "update.json"
+        declaration.write_text(json.dumps({
+            "schema_version": "3.0", "change_class": {}, "compatible": True,
+            "affected_control_ids": ["*"], "summary": "fixture",
+        }) + "\n")
+        with self.assertRaisesRegex(ValueError, "change_class is invalid"):
+            review_module.load_declaration(declaration)
+
+        init_module = self.load_script_module(
+            "init_quality_framework_enum_fixture", INIT,
+        )
+        guardrails = Path(tempfile.mkdtemp())
+        archive = guardrails / "archive" / "fixture"
+        archive.mkdir(parents=True)
+        manifest = {
+            "archive_id": "fixture", "validation_status": {},
+            "signature_status": "untrusted", "files": [],
+        }
+        manifest["archive_sha256"] = init_module.canonical_digest(manifest)
+        (archive / "archive-manifest.json").write_text(
+            json.dumps(manifest) + "\n", encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "validation status is invalid"):
+            init_module.predecessor_archive_binding(guardrails, "fixture")
 
     def test_readiness_blocks_drifted_ai_brownfield_campaign(self) -> None:
         project = self.make_project(development_mode="ai_brownfield")
@@ -2081,6 +2636,36 @@ class QualityFrameworkTest(unittest.TestCase):
             observations["OBS-browser-assert"].update(effect_result=result)
 
         mutations = {
+            "owner_review_status_object": lambda value: value["owner_review"].update(
+                status={},
+            ),
+            "hop_vantage_object": lambda value: value["hops"][0].update(
+                vantage_point={},
+            ),
+            "capability_hop_object": lambda value: value["acquisition"][
+                "capabilities"
+            ][0].update(hop_id={}),
+            "assertion_kind_object": lambda value: value["observations"][0].update(
+                assertion_kind={},
+            ),
+            "effect_result_object": lambda value: value["observations"][9].update(
+                effect_result={},
+            ),
+            "observation_capability_object": lambda value: value["observations"][0].update(
+                capability_id={},
+            ),
+            "observation_hop_object": lambda value: value["observations"][0].update(
+                hop_id={},
+            ),
+            "failure_cleanup_object": lambda value: value["entrypoint_closure"][
+                "failure_paths"
+            ][0].update(cleanup_observation_ids=[{}]),
+            "protection_preflight_object": lambda value: value["protection_edges"][0].update(
+                preflight_observation_id={},
+            ),
+            "assertion_effect_object": lambda value: value["observations"][10].update(
+                effect_id={},
+            ),
             "not_executed": lambda value: value["observations"][8].update(
                 execution_state="not_executed",
             ),

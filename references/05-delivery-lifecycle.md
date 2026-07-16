@@ -131,6 +131,16 @@ registry, and Skill. The manifest is excluded because it stores the binding;
 callers cannot supply it. Task/phase claims derive scope from the
 registration instead of accepting an ad hoc control subset.
 
+Before registration, lint the campaign hierarchy. Literal task scopes must be
+inside their phase scopes, and phase scopes must be inside the campaign scope;
+unsafe and duplicate paths reject registration. Glob relationships remain
+explicitly unproven rather than being guessed. Before task assignment, rerun
+the read-only linter with the exact phase/task plus every required change or
+handoff path and affected control. When the task requires real product
+acquisition, request that check explicitly; v3 reports the typed unmodeled
+acquisition blocker and never treats structural validity as execution
+authorization, control evidence, readiness, or a claim.
+
 Human brownfield feature work may use a task claim only when all affected
 controls pass in every required audit stage and measured debt does not grow.
 Project claims never accept a selected control subset.

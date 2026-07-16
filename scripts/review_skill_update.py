@@ -17,11 +17,13 @@ from quality_common import (
     exclusive_file_lock,
     framework_binding,
     load_json_yaml,
+    registry_control_ids,
     safe_relative_path,
     validate_ledger,
     validate_manifest,
     validate_registry,
     validate_traceability,
+    valid_enum,
     write_json_yaml,
 )
 
@@ -95,12 +97,16 @@ def inferred_change_class(paths: list[str] | None) -> str:
 
 def load_declaration(path: Path) -> dict:
     declaration = load_json_yaml(path)
+    if not isinstance(declaration, dict):
+        raise ValueError("update declaration must be an object")
     allowed = {"schema_version", "change_class", "compatible", "affected_control_ids", "summary"}
     if set(declaration) - allowed:
         raise ValueError("update declaration contains unknown fields")
     if declaration.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("update declaration schema does not match the active Skill schema")
-    if declaration.get("change_class") not in set(CHANGE_PRIORITY) - {"none"}:
+    if not valid_enum(
+        declaration.get("change_class"), set(CHANGE_PRIORITY) - {"none"},
+    ):
         raise ValueError("update declaration change_class is invalid")
     if not isinstance(declaration.get("compatible"), bool):
         raise ValueError("update declaration compatible must be boolean")
@@ -139,10 +145,7 @@ def report_for(
             "schema", "incompatible_semantics",
         }
     affected = declaration["affected_control_ids"]
-    known = sorted(
-        control["id"] for control in registry.get("controls", [])
-        if isinstance(control, dict) and isinstance(control.get("id"), str)
-    )
+    known = sorted(registry_control_ids(registry))
     rerun = known if "*" in affected else sorted(set(affected) & set(known))
     return {
         "status": "update_available" if compatible else "incompatible_update",
@@ -176,10 +179,7 @@ def apply_compatible_update(
         campaign["baseline_binding"] = campaign_baseline_binding(
             root, relative, registry, current,
         )
-    control_ids = {
-        control["id"] for control in registry.get("controls", [])
-        if isinstance(control, dict) and isinstance(control.get("id"), str)
-    }
+    control_ids = registry_control_ids(registry)
     errors = (
         validate_registry(registry)
         + validate_manifest(candidate, control_ids)
@@ -216,6 +216,14 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         print(json.dumps({"status": "error", "errors": [str(exc)]}, sort_keys=True))
         return 2
+    if not isinstance(manifest, dict) or not isinstance(registry, dict):
+        errors = []
+        if not isinstance(manifest, dict):
+            errors.append("quality manifest must be an object")
+        if not isinstance(registry, dict):
+            errors.append("control registry must be an object")
+        print(json.dumps({"status": "error", "errors": errors}, sort_keys=True))
+        return 2
     if manifest.get("schema_version") == SCHEMA_VERSION:
         try:
             ledger = load_json_yaml(guardrails / "evidence-ledger.json")
@@ -223,10 +231,7 @@ def main() -> int:
         except ValueError as exc:
             print(json.dumps({"status": "error", "errors": [str(exc)]}, sort_keys=True))
             return 2
-        control_ids = {
-            control.get("id") for control in registry.get("controls", [])
-            if isinstance(control, dict) and isinstance(control.get("id"), str)
-        }
+        control_ids = registry_control_ids(registry)
         errors = (
             validate_registry(registry)
             + validate_manifest(manifest, control_ids)

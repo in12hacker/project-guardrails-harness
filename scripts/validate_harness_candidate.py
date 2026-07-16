@@ -9,7 +9,13 @@ import json
 from pathlib import Path
 
 from generation_common import bounded_diagnostics
-from quality_common import load_json_yaml, safe_relative_path, valid_sha256, valid_timestamp
+from quality_common import (
+    load_json_yaml,
+    safe_relative_path,
+    valid_enum,
+    valid_sha256,
+    valid_timestamp,
+)
 
 
 ASSERTION_KINDS = {
@@ -65,6 +71,11 @@ def string_list(value: object, *, allow_empty: bool = False) -> bool:
         and (allow_empty or bool(value))
         and all(non_empty_string(item) for item in value)
     )
+
+
+def string_key_get(mapping: dict[str, dict], key: object) -> dict | None:
+    """Read an externally selected object without hashing malformed keys."""
+    return mapping.get(key) if isinstance(key, str) else None
 
 
 def parse_time(value: str) -> dt.datetime:
@@ -145,7 +156,7 @@ def validate_candidate(candidate: dict) -> list[str]:
         "candidate.owner_review",
     )
     errors.extend(review_errors)
-    if review.get("status") not in {"pending", "approved"}:
+    if not valid_enum(review.get("status"), {"pending", "approved"}):
         errors.append("candidate.owner_review.status is invalid")
     if not non_empty_string(review.get("owner")):
         errors.append("candidate.owner_review.owner is required")
@@ -266,7 +277,7 @@ def validate_candidate(candidate: dict) -> list[str]:
         for field in ("owner", "target"):
             if not non_empty_string(hop.get(field)):
                 errors.append(f"{path}.{field} is required")
-        if hop.get("vantage_point") not in VANTAGE_POINTS:
+        if not valid_enum(hop.get("vantage_point"), VANTAGE_POINTS):
             errors.append(f"{path}.vantage_point is invalid")
         dependencies = hop.get("depends_on")
         if not string_list(dependencies, allow_empty=True):
@@ -314,7 +325,7 @@ def validate_candidate(candidate: dict) -> list[str]:
             errors.append(f"duplicate capability_id: {capability_id}")
             continue
         capabilities_by_id[capability_id] = capability
-        hop = hops_by_id.get(capability.get("hop_id"))
+        hop = string_key_get(hops_by_id, capability.get("hop_id"))
         if hop is None:
             errors.append(f"{path}.hop_id references an unknown hop")
         else:
@@ -368,7 +379,7 @@ def validate_candidate(candidate: dict) -> list[str]:
                 dependencies = []
             graph[observation_id] = dependencies
         kind = observation.get("assertion_kind")
-        if kind not in ASSERTION_KINDS:
+        if not valid_enum(kind, ASSERTION_KINDS):
             errors.append(f"{path}.assertion_kind is invalid")
         else:
             if observation.get("phase") != ASSERTION_PHASE[kind]:
@@ -380,7 +391,7 @@ def validate_candidate(candidate: dict) -> list[str]:
                 errors.append(f"{path}.effect_id must be null for {kind}")
             effect_result = observation.get("effect_result")
             if kind in {"effect_outcome", "product_assertion"}:
-                if effect_result not in EFFECT_RESULTS:
+                if not valid_enum(effect_result, EFFECT_RESULTS):
                     errors.append(
                         f"{path}.effect_result must be one of: {', '.join(sorted(EFFECT_RESULTS))}",
                     )
@@ -401,7 +412,9 @@ def validate_candidate(candidate: dict) -> list[str]:
                         )
             elif required_capabilities != []:
                 errors.append(f"{path}.required_capability_ids must be empty for {kind}")
-        capability = capabilities_by_id.get(observation.get("capability_id"))
+        capability = string_key_get(
+            capabilities_by_id, observation.get("capability_id"),
+        )
         if capability is None:
             errors.append(f"{path}.capability_id references an unknown capability")
         else:
@@ -410,7 +423,10 @@ def validate_candidate(candidate: dict) -> list[str]:
             for field in ("target", "vantage_point"):
                 if observation.get(field) != capability.get(field):
                     errors.append(f"{path}.{field} does not match its capability")
-        if observation.get("hop_id") not in hops_by_id:
+        if (
+            not isinstance(observation.get("hop_id"), str)
+            or observation["hop_id"] not in hops_by_id
+        ):
             errors.append(f"{path}.hop_id references an unknown hop")
         if observation.get("run_id") != run.get("run_id"):
             errors.append(f"{path}.run_id does not match candidate.run")
@@ -445,10 +461,16 @@ def validate_candidate(candidate: dict) -> list[str]:
     if set(all_artifacts) != set(required_artifacts) or len(all_artifacts) != len(required_artifacts):
         errors.append("runtime and static artifacts must exactly close the required artifact set")
 
-    used_hops = {item.get("hop_id") for item in observations_by_id.values()}
+    used_hops = {
+        item["hop_id"] for item in observations_by_id.values()
+        if isinstance(item.get("hop_id"), str)
+    }
     for hop_id in sorted(set(hops_by_id) - used_hops):
         errors.append(f"declared hop has no runtime observation: {hop_id}")
-    used_capabilities = {item.get("capability_id") for item in observations_by_id.values()}
+    used_capabilities = {
+        item["capability_id"] for item in observations_by_id.values()
+        if isinstance(item.get("capability_id"), str)
+    }
     for capability_id in sorted(set(capabilities_by_id) - used_capabilities):
         errors.append(f"declared capability has no runtime observation: {capability_id}")
 
@@ -474,12 +496,15 @@ def validate_candidate(candidate: dict) -> list[str]:
             allow_empty=field in {"effect_execution_steps", "effect_commit_points"},
         ))
     cleanup_owners = closure.get("cleanup_owners")
-    actual_cleanup_owners = {
-        capabilities_by_id[observation["capability_id"]]["owner"]
-        for observation in observations_by_id.values()
-        if observation.get("assertion_kind") == "cleanup"
-        and observation.get("capability_id") in capabilities_by_id
-    }
+    actual_cleanup_owners: set[str] = set()
+    for observation in observations_by_id.values():
+        if observation.get("assertion_kind") != "cleanup":
+            continue
+        capability = string_key_get(
+            capabilities_by_id, observation.get("capability_id"),
+        )
+        if capability is not None and isinstance(capability.get("owner"), str):
+            actual_cleanup_owners.add(capability["owner"])
     if not string_list(cleanup_owners):
         errors.append("candidate.entrypoint_closure.cleanup_owners must be a non-empty owner list")
     elif len(cleanup_owners) != len(set(cleanup_owners)) or set(cleanup_owners) != actual_cleanup_owners:
@@ -489,17 +514,22 @@ def validate_candidate(candidate: dict) -> list[str]:
     for index, failure_path in enumerate(parsed_failure_paths):
         path = f"candidate.entrypoint_closure.failure_paths[{index}]"
         cleanup_ids = failure_path.get("cleanup_observation_ids", [])
+        if not string_list(cleanup_ids):
+            cleanup_ids = []
         valid_cleanup_ids = {
             item for item in cleanup_ids if item in actual_by_kind["cleanup"]
         }
         if not string_list(cleanup_ids) or len(valid_cleanup_ids) != len(cleanup_ids):
             errors.append(f"{path}.cleanup_observation_ids must reference cleanup observations")
         referenced_failure_cleanups.update(valid_cleanup_ids)
-        actual_owners = {
-            capabilities_by_id[observations_by_id[item]["capability_id"]]["owner"]
-            for item in valid_cleanup_ids
-            if observations_by_id[item].get("capability_id") in capabilities_by_id
-        }
+        actual_owners: set[str] = set()
+        for item in valid_cleanup_ids:
+            capability = string_key_get(
+                capabilities_by_id,
+                observations_by_id[item].get("capability_id"),
+            )
+            if capability is not None and isinstance(capability.get("owner"), str):
+                actual_owners.add(capability["owner"])
         owners = failure_path.get("owners")
         if string_list(owners) and (
             len(owners) != len(set(owners)) or set(owners) != actual_owners
@@ -526,10 +556,15 @@ def validate_candidate(candidate: dict) -> list[str]:
                 errors.append(f"data flow {dependency_id}->{observation_id} lacks temporal ordering")
             source_hop = dependency.get("hop_id")
             target_hop = observation.get("hop_id")
-            if source_hop != target_hop and source_hop not in graph_ancestors(hop_graph, target_hop):
+            cross_hop_valid = (
+                isinstance(source_hop, str)
+                and isinstance(target_hop, str)
+                and source_hop in graph_ancestors(hop_graph, target_hop)
+            )
+            if source_hop != target_hop and not cross_hop_valid:
                 errors.append(f"data flow {dependency_id}->{observation_id} violates the hop DAG")
         kind = observation.get("assertion_kind")
-        if kind in {"product_assertion", "cleanup"} and not any(
+        if valid_enum(kind, {"product_assertion", "cleanup"}) and not any(
             observations_by_id[item].get("assertion_kind") == "effect_outcome"
             for item in temporal_ancestors if item in observations_by_id
         ):
@@ -564,7 +599,7 @@ def validate_candidate(candidate: dict) -> list[str]:
     for observation_id, observation in observations_by_id.items():
         kind = observation.get("assertion_kind")
         effect_id = observation.get("effect_id")
-        if kind in EFFECT_KINDS and non_empty_string(effect_id):
+        if valid_enum(kind, EFFECT_KINDS) and non_empty_string(effect_id):
             lifecycle_by_effect.setdefault(effect_id, {}).setdefault(kind, []).append(observation_id)
     for effect_id, lifecycle in lifecycle_by_effect.items():
         for kind in ("effect_attempt", "effect_outcome"):
@@ -628,7 +663,10 @@ def validate_candidate(candidate: dict) -> list[str]:
             errors.append(f"effect {effect_id} has no cleanup descendant")
     for assertion_id in actual_by_kind["product_assertion"]:
         asserted_effect = observations_by_id[assertion_id].get("effect_id")
-        if asserted_effect not in lifecycle_by_effect:
+        if (
+            not isinstance(asserted_effect, str)
+            or asserted_effect not in lifecycle_by_effect
+        ):
             errors.append(
                 f"product assertion {assertion_id} references unknown effect {asserted_effect}",
             )
@@ -663,8 +701,8 @@ def validate_candidate(candidate: dict) -> list[str]:
             protected_capabilities.setdefault(effect_id, set()).add(capability_id)
         preflight_id = edge.get("preflight_observation_id")
         readiness_id = edge.get("readiness_observation_id")
-        preflight = observations_by_id.get(preflight_id)
-        readiness = observations_by_id.get(readiness_id)
+        preflight = string_key_get(observations_by_id, preflight_id)
+        readiness = string_key_get(observations_by_id, readiness_id)
         if preflight is None or preflight.get("assertion_kind") != "capability_preflight":
             errors.append(f"{path}.preflight_observation_id must reference capability_preflight")
         elif preflight.get("capability_id") != capability_id:
@@ -673,10 +711,18 @@ def validate_candidate(candidate: dict) -> list[str]:
             errors.append(f"{path}.readiness_observation_id must reference target_context_readiness")
         elif readiness.get("capability_id") != capability_id:
             errors.append(f"{path}.readiness observation uses a different capability")
-        lifecycle = lifecycle_by_effect.get(effect_id, {})
+        lifecycle = (
+            lifecycle_by_effect.get(effect_id, {})
+            if isinstance(effect_id, str) else {}
+        )
         attempts = lifecycle.get("effect_attempt", [])
         commits = lifecycle.get("effect_commit", [])
-        if preflight_id in observations_by_id and readiness_id in observations_by_id:
+        if (
+            isinstance(preflight_id, str)
+            and isinstance(readiness_id, str)
+            and preflight_id in observations_by_id
+            and readiness_id in observations_by_id
+        ):
             if preflight_id not in graph_ancestors(temporal_graph, readiness_id):
                 errors.append(f"{path} readiness does not follow its preflight")
             for protected_id in [*attempts, *commits]:

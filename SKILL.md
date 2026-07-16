@@ -49,9 +49,17 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
    - For AI brownfield work, register the reviewed campaign specification before any task or phase claim:
 
    ```bash
+   python3 "$SKILL_DIR/scripts/lint_campaign.py" --root . \
+     --campaign /path/to/reviewed-campaign.json
    python3 "$SKILL_DIR/scripts/register_campaign.py" --root . \
      --campaign /path/to/reviewed-campaign.json
    ```
+   - Before assigning a task, lint its explicit context with every required
+     implementation/report path and affected control. Add
+     `--require-product-acquisition` when real effect acquisition is part of
+     the task. The v3 linter then returns a typed modeling blocker instead of
+     inventing authorization. Campaign lint is read-only structural preflight,
+     not control evidence or readiness.
 
 4. **Ingest existing truth before adding controls**
    - Read existing instruction files, CI, build targets, test registries, fitness runners, release workflows, contracts, and operations docs.

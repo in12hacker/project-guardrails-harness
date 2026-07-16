@@ -15,6 +15,7 @@ from quality_common import (
     exclusive_file_lock,
     file_sha256,
     load_json_yaml,
+    registry_control_ids,
     validate_manifest,
     validate_ledger,
     validate_registry,
@@ -142,10 +143,7 @@ def validate_active_plane(
 
     registry = documents["control-registry.yaml"]
     registry_errors = validate_registry(registry)
-    control_ids = {
-        control.get("id") for control in registry.get("controls", [])
-        if isinstance(control, dict) and isinstance(control.get("id"), str)
-    }
+    control_ids = registry_control_ids(registry)
     errors.extend(registry_errors)
     errors.extend(validate_manifest(documents["quality-manifest.yaml"], control_ids))
     if registry_errors:
@@ -154,7 +152,10 @@ def validate_active_plane(
         errors.extend(validate_traceability(documents["traceability-graph.json"], registry))
     ledger = documents["evidence-ledger.json"]
     errors.extend(validate_ledger(ledger, root))
-    artifact_errors, artifact_records = referenced_artifacts(ledger, root, guardrails)
+    artifact_errors, artifact_records = (
+        referenced_artifacts(ledger, root, guardrails)
+        if isinstance(ledger, dict) else ([], [])
+    )
     errors.extend(artifact_errors)
     return errors, documents, artifact_records
 

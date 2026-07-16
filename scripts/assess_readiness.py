@@ -21,6 +21,7 @@ from quality_common import (
     framework_binding,
     load_json_yaml,
     project_subject_binding,
+    registry_control_ids,
     safe_relative_path,
     validate_ledger,
     validate_manifest,
@@ -193,10 +194,7 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         print(json.dumps({"status": "error", "errors": [str(exc)]}, sort_keys=True))
         return 2
-    control_ids = {
-        control.get("id") for control in registry.get("controls", [])
-        if isinstance(control, dict) and isinstance(control.get("id"), str)
-    }
+    control_ids = registry_control_ids(registry)
     errors = (
         validate_registry(registry)
         + validate_manifest(manifest, control_ids)

@@ -29,8 +29,10 @@ from quality_common import (
     load_json_yaml,
     maturity_applies,
     project_subject_binding,
+    registry_control_ids,
     safe_relative_path,
     selected_source_sha256,
+    valid_integer,
     validate_manifest,
     validate_ledger,
     validate_registry,
@@ -310,7 +312,7 @@ def load_debt_observation(
         observation.get(name) for name in
         ("baseline_count", "current_count", "new_count", "fixed_count")
     ]
-    if any(not isinstance(value, int) or value < 0 for value in counts):
+    if any(not valid_integer(value, minimum=0) for value in counts):
         return None, "ratchet observation counts must be non-negative integers"
     if observation["baseline_count"] != baseline["violation_count"]:
         return None, "ratchet observation baseline count does not match the registry"
@@ -832,13 +834,10 @@ def locked_main(args: argparse.Namespace, root: Path, guardrails: Path) -> int:
         print(f"FAIL [QF-FRAMEWORK]: {exc}", file=sys.stderr)
         return 2
     registry_errors = validate_registry(registry)
-    registry_control_ids = {
-        control.get("id") for control in registry.get("controls", [])
-        if isinstance(control, dict) and isinstance(control.get("id"), str)
-    }
+    control_ids = registry_control_ids(registry)
     errors = (
         registry_errors
-        + validate_manifest(manifest, registry_control_ids)
+        + validate_manifest(manifest, control_ids)
         + validate_traceability(traceability, registry)
         + validate_ledger(ledger, root)
     )

@@ -33,6 +33,7 @@ from quality_common import (
     validate_registry,
     validate_traceability,
     valid_archive_id,
+    valid_enum,
     write_json_yaml,
 )
 
@@ -73,11 +74,17 @@ def predecessor_archive_binding(out_dir: Path, archive_id: str | None) -> dict |
         raise ValueError("predecessor archive id does not match its manifest")
     if recorded_digest != canonical_digest(digest_input):
         raise ValueError("predecessor archive manifest digest is invalid")
-    if archive.get("validation_status") not in {"validated", "legacy_unvalidated"}:
+    if not valid_enum(
+        archive.get("validation_status"), {"validated", "legacy_unvalidated"},
+    ):
         raise ValueError("predecessor archive validation status is invalid")
-    if archive.get("signature_status") not in {
-        "digest_only", "pending_external_signature", "verified_external_signature", "untrusted",
-    }:
+    if not valid_enum(
+        archive.get("signature_status"),
+        {
+            "digest_only", "pending_external_signature",
+            "verified_external_signature", "untrusted",
+        },
+    ):
         raise ValueError("predecessor archive signature status is invalid")
     inventory = archive.get("files")
     if not isinstance(inventory, list):

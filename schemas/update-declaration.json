@@ -5,5 +5,5 @@
   "affected_control_ids": [
     "*"
   ],
-  "summary": "Requires typed task readiness, reports unmodeled acquisition without inventing task applicability, and replaces the rejected single-hop proposal with flow/protection DAGs that distinguish committed effects from prevented no-commit outcomes and bind static/failure closure without changing the v3 control plane schema."
+  "summary": "Hardens every v3 control-plane entrypoint and shared validator so malformed nested framework, campaign, traceability, or ledger input is rejected deterministically before derivation, execution, mutation, or claim; no compatibility reader or schema change is introduced."
 }

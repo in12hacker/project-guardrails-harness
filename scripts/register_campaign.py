@@ -13,6 +13,7 @@ from quality_common import (
     exclusive_file_lock,
     framework_binding,
     load_json_yaml,
+    registry_control_ids,
     safe_relative_path,
     validate_campaign,
     validate_manifest,
@@ -58,8 +59,11 @@ def locked_main(
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"FAIL [QF-CAMPAIGN]: {exc}", file=sys.stderr)
         return 2
-    framework_errors = validate_registry(registry) + validate_traceability(
-        traceability, registry,
+    control_ids = registry_control_ids(registry)
+    framework_errors = (
+        validate_registry(registry)
+        + validate_manifest(manifest, control_ids)
+        + validate_traceability(traceability, registry)
     )
     if framework_errors:
         for error in framework_errors:
@@ -79,11 +83,15 @@ def locked_main(
     if forbidden:
         print("FAIL [QF-CAMPAIGN]: baseline bindings are generated, not supplied", file=sys.stderr)
         return 2
+    requested_revision = specification.get("revision")
+    if type(requested_revision) is not int or requested_revision < 1:
+        print("FAIL [QF-CAMPAIGN]: campaign revision must be an integer >= 1", file=sys.stderr)
+        return 2
     current = manifest.get("development_policy", {}).get("active_campaign")
     if current is not None and not args.replace_active:
         print("FAIL [QF-CAMPAIGN]: an active campaign exists; use --replace-active after review", file=sys.stderr)
         return 2
-    if current is not None and specification.get("revision", 0) <= current.get("revision", 0):
+    if current is not None and requested_revision <= current["revision"]:
         print("FAIL [QF-CAMPAIGN]: replacement revision must increase", file=sys.stderr)
         return 2
     current_framework = framework_binding(Path(__file__).resolve().parent.parent)
@@ -103,7 +111,6 @@ def locked_main(
         **specification,
         "baseline_binding": baseline_binding,
     }
-    control_ids = {control["id"] for control in registry["controls"]}
     errors = validate_campaign(campaign, control_ids)
     if campaign.get("target_maturity") != manifest.get("project", {}).get("target_maturity"):
         errors.append("campaign target_maturity must match the project target")

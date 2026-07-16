@@ -13,7 +13,13 @@ import tempfile
 from pathlib import Path
 
 from evaluate_quality import CampaignContextError, campaign_claim_context
-from quality_common import load_json_yaml, safe_relative_path
+from quality_common import (
+    load_json_yaml,
+    registry_control_ids,
+    safe_relative_path,
+    validate_manifest,
+    validate_registry,
+)
 
 
 HEADER_BEGIN = "<!-- PROJECT-GUARDRAILS:TASK-HANDOFF:BEGIN -->"
@@ -140,6 +146,12 @@ def readiness_report(args: argparse.Namespace, root: Path) -> dict:
 def build_payload(args: argparse.Namespace, root: Path, guardrails: Path) -> dict:
     manifest = load_json_yaml(guardrails / "quality-manifest.yaml")
     registry = load_json_yaml(guardrails / "control-registry.yaml")
+    framework_errors = (
+        validate_registry(registry)
+        + validate_manifest(manifest, registry_control_ids(registry))
+    )
+    if framework_errors:
+        raise ValueError("; ".join(sorted(set(framework_errors))))
     context = argparse.Namespace(
         campaign_id=args.campaign_id,
         campaign_revision=args.campaign_revision,

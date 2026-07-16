@@ -224,7 +224,7 @@ def selected_source_sha256(path: Path, selector: dict[str, Any]) -> str | None:
     occurrence = selector.get("occurrence", 1)
     if not isinstance(heading, str) or not heading.startswith("#"):
         return None
-    if not isinstance(occurrence, int) or occurrence < 1:
+    if not valid_integer(occurrence, minimum=1):
         return None
     sections = markdown_heading_sections(path.read_text(encoding="utf-8"))
     match = next(
@@ -337,7 +337,7 @@ def build_traceability_graph(registry: dict[str, Any]) -> dict[str, Any]:
                 "verification_ids": control.get("verification_ids", []),
                 "evidence_required": control.get("evidence_required", []),
             }
-            for control in registry.get("controls", [])
+            for control in object_items(registry.get("controls"))
         ],
     }
 
@@ -480,8 +480,10 @@ def maturity_applies(required_from: str, target: str) -> bool:
     return MATURITY_LEVELS.index(required_from) <= MATURITY_LEVELS.index(target)
 
 
-def unknown_fields(value: dict[str, Any], allowed: set[str], path: str) -> list[str]:
+def unknown_fields(value: Any, allowed: set[str], path: str) -> list[str]:
     """Report unknown fields where silent schema extension could alter claims."""
+    if not isinstance(value, dict):
+        return [f"{path} must be an object"]
     return [f"{path}.{field} is not allowed" for field in sorted(set(value) - allowed)]
 
 
@@ -489,6 +491,47 @@ def non_empty_strings(value: Any) -> bool:
     return isinstance(value, list) and bool(value) and all(
         isinstance(item, str) and bool(item.strip()) for item in value
     )
+
+
+def object_items(value: Any) -> list[dict[str, Any]]:
+    """Project object members for diagnostics without asserting validity."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def string_items(value: Any) -> list[str]:
+    """Project string members for diagnostics without asserting validity."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
+
+
+def registry_control_ids(registry: Any) -> set[str]:
+    """Safely project declared control IDs while registry errors are collected."""
+    if not isinstance(registry, dict):
+        return set()
+    return {
+        control["id"]
+        for control in object_items(registry.get("controls"))
+        if isinstance(control.get("id"), str) and control["id"]
+    }
+
+
+def valid_enum(value: Any, allowed: set[str]) -> bool:
+    """Return membership only for a hashable, non-empty string value."""
+    return isinstance(value, str) and value in allowed
+
+
+def valid_integer(
+    value: Any, *, minimum: int | None = None, maximum: int | None = None,
+) -> bool:
+    """Validate a JSON integer without accepting Python booleans."""
+    if type(value) is not int:
+        return False
+    if minimum is not None and value < minimum:
+        return False
+    return maximum is None or value <= maximum
 
 
 def valid_sha256(value: Any) -> bool:
@@ -595,10 +638,55 @@ def validate_exit_policy(policy: Any, path: str) -> list[str]:
         path,
     )
     for field in ("max_new_violations", "minimum_fixed_violations"):
-        if not isinstance(policy.get(field), int) or policy[field] < 0:
+        if not valid_integer(policy.get(field), minimum=0):
             errors.append(f"{path}.{field} must be a non-negative integer")
     if not isinstance(policy.get("allow_open_cleanup_debt"), bool):
         errors.append(f"{path}.allow_open_cleanup_debt must be boolean")
+    return errors
+
+
+def scope_entry_covers(parent: str, child: str) -> bool | None:
+    """Return whether one literal project-relative scope covers another.
+
+    ``None`` means containment cannot be proven because either entry contains
+    glob syntax.  Campaign registration accepts such existing v3 scopes but a
+    preflight linter must report the unproven relationship explicitly.
+    """
+    if not safe_relative_path(parent) or not safe_relative_path(child):
+        return False
+    if any(character in parent or character in child for character in "*?["):
+        return None
+    parent_path = Path(parent).as_posix().rstrip("/") or "."
+    child_path = Path(child).as_posix().rstrip("/") or "."
+    if parent_path == ".":
+        return True
+    return child_path == parent_path or child_path.startswith(parent_path + "/")
+
+
+def scope_hierarchy_errors(
+    parent_scope: Any, child_scope: Any, parent_path: str, child_path: str,
+) -> list[str]:
+    """Reject unsafe, duplicate, or provably out-of-parent campaign scopes."""
+    errors: list[str] = []
+    if not non_empty_strings(parent_scope) or not non_empty_strings(child_scope):
+        return errors
+    for label, scope in ((parent_path, parent_scope), (child_path, child_scope)):
+        if len(scope) != len(set(scope)):
+            errors.append(f"{label} contains duplicate paths")
+        for entry in scope:
+            if not safe_relative_path(entry):
+                errors.append(f"{label} contains unsafe path: {entry}")
+    if errors:
+        return errors
+    for entry in child_scope:
+        coverage = [scope_entry_covers(parent, entry) for parent in parent_scope]
+        if True in coverage:
+            continue
+        if None in coverage:
+            continue
+        errors.append(
+            f"{child_path} path is outside {parent_path}: {entry}",
+        )
     return errors
 
 
@@ -617,7 +705,7 @@ def validate_campaign(campaign: Any, control_ids: set[str] | None = None) -> lis
     for field in ("id", "owner"):
         if not isinstance(campaign.get(field), str) or not campaign[field].strip():
             errors.append(f"{prefix}.{field} is required")
-    if not isinstance(campaign.get("revision"), int) or campaign["revision"] < 1:
+    if not valid_integer(campaign.get("revision"), minimum=1):
         errors.append(f"{prefix}.revision must be an integer >= 1")
     errors.extend(validate_campaign_baseline_binding(
         campaign.get("baseline_binding"), f"{prefix}.baseline_binding",
@@ -659,6 +747,10 @@ def validate_campaign(campaign: Any, control_ids: set[str] | None = None) -> lis
                 errors.append(f"{phase_path}.affected_control_ids contains unknown controls: {', '.join(unknown)}")
         if not non_empty_strings(phase.get("assessed_scope")):
             errors.append(f"{phase_path}.assessed_scope must be a non-empty string list")
+        errors.extend(scope_hierarchy_errors(
+            campaign.get("assessed_scope"), phase.get("assessed_scope"),
+            f"{prefix}.assessed_scope", f"{phase_path}.assessed_scope",
+        ))
         errors.extend(validate_exit_policy(phase.get("exit_policy"), f"{phase_path}.exit_policy"))
         tasks = phase.get("tasks")
         if not isinstance(tasks, list) or not tasks:
@@ -681,7 +773,10 @@ def validate_campaign(campaign: Any, control_ids: set[str] | None = None) -> lis
                 errors.append(f"duplicate campaign task id: {task_id}")
             else:
                 task_ids.add(task_id)
-            if task.get("kind") not in {"debt_reduction", "framework_adoption", "correctness_fix"}:
+            if not valid_enum(
+                task.get("kind"),
+                {"debt_reduction", "framework_adoption", "correctness_fix"},
+            ):
                 errors.append(f"{task_path}.kind is invalid")
             task_controls = task.get("affected_control_ids")
             if not non_empty_strings(task_controls):
@@ -695,13 +790,19 @@ def validate_campaign(campaign: Any, control_ids: set[str] | None = None) -> lis
                         errors.append(f"{task_path}.affected_control_ids contains unknown controls: {', '.join(unknown)}")
             if not non_empty_strings(task.get("assessed_scope")):
                 errors.append(f"{task_path}.assessed_scope must be a non-empty string list")
+            errors.extend(scope_hierarchy_errors(
+                phase.get("assessed_scope"), task.get("assessed_scope"),
+                f"{phase_path}.assessed_scope", f"{task_path}.assessed_scope",
+            ))
             errors.extend(validate_exit_policy(task.get("exit_policy"), f"{task_path}.exit_policy"))
     return errors
 
 
 def validate_manifest(
-    manifest: dict[str, Any], control_ids: set[str] | None = None,
+    manifest: Any, control_ids: set[str] | None = None,
 ) -> list[str]:
+    if not isinstance(manifest, dict):
+        return ["quality manifest must be an object"]
     errors: list[str] = []
     errors.extend(unknown_fields(
         manifest,
@@ -746,7 +847,10 @@ def validate_manifest(
         errors.append("framework.content_sha256 must be a SHA-256 digest")
     if not isinstance(framework.get("dirty"), bool):
         errors.append("framework.dirty must be boolean")
-    if framework.get("trust_level") not in {"unverified", "verified_commit", "signed_release"}:
+    if not valid_enum(
+        framework.get("trust_level"),
+        {"unverified", "verified_commit", "signed_release"},
+    ):
         errors.append("framework.trust_level is invalid")
     signed_tag = framework.get("signed_tag")
     if signed_tag is not None and (not isinstance(signed_tag, str) or not signed_tag.strip()):
@@ -764,20 +868,19 @@ def validate_manifest(
     evidence_profile = evidence_policy.get("profile")
     retention = evidence_policy.get("retention")
     sealing_profile = evidence_policy.get("sealing_profile")
-    if evidence_profile not in {"open_source", "commercial", "regulated", "custom"}:
-        errors.append("evidence_policy.profile is invalid")
-    if retention not in {"project_lifetime", "release_lifetime", "permanent"}:
-        errors.append("evidence_policy.retention is invalid")
-    if (
-        not isinstance(evidence_policy.get("max_active_bytes"), int)
-        or evidence_policy["max_active_bytes"] < 1048576
+    if not valid_enum(
+        evidence_profile, {"open_source", "commercial", "regulated", "custom"},
     ):
+        errors.append("evidence_policy.profile is invalid")
+    if not valid_enum(retention, {"project_lifetime", "release_lifetime", "permanent"}):
+        errors.append("evidence_policy.retention is invalid")
+    if not valid_integer(evidence_policy.get("max_active_bytes"), minimum=1048576):
         errors.append("evidence_policy.max_active_bytes must be an integer >= 1048576")
     if evidence_policy.get("redact_outputs") is not True:
         errors.append("evidence_policy.redact_outputs must be true")
-    if sealing_profile not in {"sha256_chain", "sigstore_bundle"}:
+    if not valid_enum(sealing_profile, {"sha256_chain", "sigstore_bundle"}):
         errors.append("evidence_policy.sealing_profile is invalid")
-    if evidence_profile in {"commercial", "regulated"}:
+    if valid_enum(evidence_profile, {"commercial", "regulated"}):
         if retention != "permanent":
             errors.append(f"{evidence_profile} evidence requires permanent retention")
         if sealing_profile != "sigstore_bundle":
@@ -796,12 +899,18 @@ def validate_manifest(
                 errors.append("evidence_policy.predecessor_archive.archive_id is invalid")
             if not valid_sha256(predecessor.get("archive_sha256")):
                 errors.append("evidence_policy.predecessor_archive.archive_sha256 is invalid")
-            if predecessor.get("validation_status") not in {"validated", "legacy_unvalidated"}:
+            if not valid_enum(
+                predecessor.get("validation_status"),
+                {"validated", "legacy_unvalidated"},
+            ):
                 errors.append("evidence_policy.predecessor_archive.validation_status is invalid")
-            if predecessor.get("signature_status") not in {
-                "digest_only", "pending_external_signature", "verified_external_signature",
-                "untrusted",
-            }:
+            if not valid_enum(
+                predecessor.get("signature_status"),
+                {
+                    "digest_only", "pending_external_signature",
+                    "verified_external_signature", "untrusted",
+                },
+            ):
                 errors.append("evidence_policy.predecessor_archive.signature_status is invalid")
     errors.extend(unknown_fields(
         project, {"name", "root", "development_mode", "target_maturity"}, "project",
@@ -844,9 +953,10 @@ def validate_manifest(
             errors.append(f"{name} must be explicitly selected")
     if project.get("target_maturity") not in MATURITY_LEVELS:
         errors.append("project.target_maturity is invalid")
-    if project.get("development_mode") not in {
-        "ai_greenfield", "ai_brownfield", "human_greenfield", "human_brownfield",
-    }:
+    if not valid_enum(
+        project.get("development_mode"),
+        {"ai_greenfield", "ai_brownfield", "human_greenfield", "human_brownfield"},
+    ):
         errors.append("project.development_mode is invalid")
     enum_fields = {
         "distribution_model": {"open_source", "open_core", "private_commercial", "saas", "client_software", "embedded", "mixed"},
@@ -859,14 +969,14 @@ def validate_manifest(
         "skill_deployment": {"environment_managed", "project_symlink", "vendored"},
     }
     for name, allowed in enum_fields.items():
-        if profile.get(name) not in allowed:
+        if not valid_enum(profile.get(name), allowed):
             errors.append(f"profile.{name} is invalid")
     for name in (
         "product_types", "target_markets", "deployment_models", "primary_users",
         "legal_profiles", "quality_dimensions", "public_contracts",
     ):
         value = profile.get(name)
-        if not isinstance(value, list) or not value or "REQUIRED" in value:
+        if not non_empty_strings(value) or "REQUIRED" in value:
             errors.append(f"profile.{name} must be a non-empty explicit list")
     public_contracts = profile.get("public_contracts")
     allowed_public_contracts = {
@@ -885,10 +995,12 @@ def validate_manifest(
                 errors.append("profile.public_contracts cannot combine none with another contract type")
     if not isinstance(profile.get("ai_system"), bool):
         errors.append("profile.ai_system must be boolean")
-    if scope.get("mode") not in {"full_repo", "subproject"}:
+    if not valid_enum(scope.get("mode"), {"full_repo", "subproject"}):
         errors.append("scope.mode must be full_repo or subproject")
     if scope.get("mode") == "subproject" and scope.get("overall_project_claim_allowed") is not False:
         errors.append("subproject scope must set overall_project_claim_allowed=false")
+    if not isinstance(scope.get("overall_project_claim_allowed"), bool):
+        errors.append("scope.overall_project_claim_allowed must be boolean")
     for name in ("included_paths", "excluded_paths", "unassessed_dependencies"):
         if not isinstance(scope.get(name), list) or any(
             not isinstance(item, str) for item in scope.get(name, [])
@@ -912,7 +1024,7 @@ def validate_manifest(
         audit, {"required_stages", "independent_authorities", "authorities"}, "audit_policy",
     ))
     stages = audit.get("required_stages")
-    if not isinstance(stages, list) or not stages or any(s not in AUDIT_STAGES for s in stages):
+    if not non_empty_strings(stages) or not set(stages) <= AUDIT_STAGES:
         errors.append("audit_policy.required_stages contains invalid or missing stages")
     if audit.get("independent_authorities") is not True:
         errors.append("audit_policy.independent_authorities must be true")
@@ -939,7 +1051,10 @@ def validate_manifest(
                 errors.append(f"duplicate audit authority id: {authority_id}")
             else:
                 authority_ids.add(authority_id)
-            if authority_record.get("kind") not in {"virtual_role", "human", "ci", "external"}:
+            if not valid_enum(
+                authority_record.get("kind"),
+                {"virtual_role", "human", "ci", "external"},
+            ):
                 errors.append(f"{path}.kind is invalid")
             for field in ("identity_ref", "owner"):
                 if not isinstance(authority_record.get(field), str) or not authority_record[field].strip():
@@ -968,16 +1083,16 @@ def validate_manifest(
             policy, {"required_stages"}, f"claim_policies.{claim_kind}",
         ))
         claim_stages = policy.get("required_stages")
-        if not isinstance(claim_stages, list) or not claim_stages or any(
-            stage not in AUDIT_STAGES for stage in claim_stages
-        ):
+        if not non_empty_strings(claim_stages) or not set(claim_stages) <= AUDIT_STAGES:
             errors.append(f"claim_policies.{claim_kind}.required_stages is invalid")
         elif not set(claim_stages) <= covered_stages:
             errors.append(f"claim_policies.{claim_kind} requires an unassigned audit stage")
     return errors
 
 
-def validate_registry(registry: dict[str, Any]) -> list[str]:
+def validate_registry(registry: Any) -> list[str]:
+    if not isinstance(registry, dict):
+        return ["control registry must be an object"]
     errors: list[str] = []
     errors.extend(unknown_fields(
         registry,
@@ -990,17 +1105,22 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
     ))
     if registry.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"control registry schema_version must be {SCHEMA_VERSION}; seal the old plane and regenerate")
+    collections: dict[str, list[Any]] = {}
     for collection in (
         "capabilities", "baselines", "cleanup_debts",
         "design_scope_exemptions", "federated_rule_mappings",
     ):
-        if not isinstance(registry.get(collection), list):
+        value = registry.get(collection)
+        if not isinstance(value, list):
             errors.append(f"control registry {collection} must be an array")
+            collections[collection] = []
+        else:
+            collections[collection] = value
     controls = registry.get("controls")
     if not isinstance(controls, list) or not controls:
         return errors + ["control registry must contain at least one control"]
     capability_ids: set[str] = set()
-    for index, capability in enumerate(registry.get("capabilities", [])):
+    for index, capability in enumerate(collections["capabilities"]):
         prefix = f"capabilities[{index}]"
         if not isinstance(capability, dict):
             errors.append(f"{prefix} must be an object")
@@ -1031,11 +1151,17 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
                 errors.append(f"{prefix}.preflight.command must be a non-empty argv list")
             if not safe_relative_path(preflight.get("cwd", ".")):
                 errors.append(f"{prefix}.preflight.cwd must be project-relative")
+            timeout = preflight.get("timeout_seconds")
+            if timeout is not None and not valid_integer(
+                timeout, minimum=1, maximum=3600,
+            ):
+                errors.append(f"{prefix}.preflight.timeout_seconds is invalid")
         if not isinstance(capability.get("authorization_required"), bool):
             errors.append(f"{prefix}.authorization_required must be boolean")
-        if capability_id in {
-            "root", "cap_bpf", "secret", "external_service", "remote_ci", "device", "gpu",
-        } and capability.get("authorization_required") is not True:
+        if valid_enum(
+            capability_id,
+            {"root", "cap_bpf", "secret", "external_service", "remote_ci", "device", "gpu"},
+        ) and capability.get("authorization_required") is not True:
             errors.append(f"{prefix} privileged/external capability must require authorization")
 
     seen: set[str] = set()
@@ -1067,6 +1193,12 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
         for field in ("title", "dimension", "project_requirement", "risk", "owner"):
             if not isinstance(control.get(field), str) or not control.get(field):
                 errors.append(f"{prefix}.{field} is required")
+        for field in (
+            "source_standard", "source_version", "applicability_rationale",
+            "applicability_confirmed_by", "applicability_exemption_ref",
+        ):
+            if field in control and not isinstance(control[field], str):
+                errors.append(f"{prefix}.{field} must be a string")
         for field in ("requirement_ids", "risk_ids", "verification_ids"):
             values = control.get(field)
             if not isinstance(values, list) or not values or not all(
@@ -1083,7 +1215,7 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             not safe_relative_path(path) for path in control.get("scope", [])
         ):
             errors.append(f"{prefix}.scope must contain project-relative paths")
-        if control.get("evaluation_mode") not in {"absolute", "ratchet_delta"}:
+        if not valid_enum(control.get("evaluation_mode"), {"absolute", "ratchet_delta"}):
             errors.append(f"{prefix}.evaluation_mode is invalid")
         ratchet_policy = control.get("ratchet_policy")
         if control.get("evaluation_mode") == "ratchet_delta":
@@ -1137,10 +1269,19 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             },
             f"{prefix}.execution",
         ))
-        if execution.get("type") not in {"command", "file_exists", "file_absent", "manual", "remote", "privileged"}:
+        if not valid_enum(
+            execution.get("type"),
+            {"command", "file_exists", "file_absent", "manual", "remote", "privileged"},
+        ):
             errors.append(f"{prefix}.execution.type is invalid")
         if execution.get("type") == "command" and not isinstance(execution.get("command"), list):
             errors.append(f"{prefix}.execution.command must be an argv list")
+        if valid_enum(execution.get("type"), {"file_exists", "file_absent"}) and not (
+            safe_relative_path(execution.get("path"))
+        ):
+            errors.append(f"{prefix}.execution.path is required for file path controls")
+        if not isinstance(execution.get("authorization_required"), bool):
+            errors.append(f"{prefix}.execution.authorization_required must be boolean")
         command = execution.get("command")
         if command is not None and (
             not isinstance(command, list)
@@ -1148,10 +1289,10 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             or not all(isinstance(part, str) and part for part in command)
         ):
             errors.append(f"{prefix}.execution.command must be a non-empty argv list")
-        if isinstance(command, list) and tuple(command[:2]) in DEPENDENCY_MUTATION_PREFIXES:
+        if non_empty_strings(command) and tuple(command[:2]) in DEPENDENCY_MUTATION_PREFIXES:
             if execution.get("authorization_required") is not True:
                 errors.append(f"{prefix} dependency mutation must require authorization")
-        if execution.get("type") in {"remote", "privileged"} and execution.get("authorization_required") is not True:
+        if valid_enum(execution.get("type"), {"remote", "privileged"}) and execution.get("authorization_required") is not True:
             errors.append(f"{prefix} remote/privileged execution must require authorization")
         if not safe_relative_path(execution.get("cwd", ".")):
             errors.append(f"{prefix}.execution.cwd must be project-relative")
@@ -1163,12 +1304,12 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
         ):
             errors.append(f"{prefix}.execution.artifact_paths must be project-relative paths")
         timeout = execution.get("timeout_seconds")
-        if timeout is not None and (
-            not isinstance(timeout, int) or not 1 <= timeout <= 86400
+        if timeout is not None and not valid_integer(
+            timeout, minimum=1, maximum=86400,
         ):
             errors.append(f"{prefix}.execution.timeout_seconds is invalid")
-        if not isinstance(control.get("evidence_required"), list) or not control.get("evidence_required"):
-            errors.append(f"{prefix}.evidence_required must be non-empty")
+        if not non_empty_strings(control.get("evidence_required")):
+            errors.append(f"{prefix}.evidence_required must be a non-empty string list")
         manual = control.get("manual_evidence")
         if manual is not None:
             manual_path = f"{prefix}.manual_evidence"
@@ -1197,7 +1338,7 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
                         errors.append(f"{manual_path}.{field} must be a timezone-aware timestamp")
 
     baseline_ids: set[str] = set()
-    for index, baseline in enumerate(registry.get("baselines", [])):
+    for index, baseline in enumerate(collections["baselines"]):
         prefix = f"baselines[{index}]"
         if not isinstance(baseline, dict):
             errors.append(f"{prefix} must be an object")
@@ -1214,19 +1355,20 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"duplicate baseline id: {baseline_id}")
         else:
             baseline_ids.add(baseline_id)
-        if baseline.get("control_id") not in seen:
+        baseline_control = baseline.get("control_id")
+        if not isinstance(baseline_control, str) or baseline_control not in seen:
             errors.append(f"{prefix}.control_id references an unknown control")
-        if not isinstance(baseline.get("revision"), int) or baseline["revision"] < 1:
+        if not valid_integer(baseline.get("revision"), minimum=1):
             errors.append(f"{prefix}.revision must be an integer >= 1")
         if not safe_relative_path(baseline.get("source_ref")):
             errors.append(f"{prefix}.source_ref must be project-relative")
         if not valid_sha256(baseline.get("source_sha256")):
             errors.append(f"{prefix}.source_sha256 must be a SHA-256 digest")
-        if not isinstance(baseline.get("violation_count"), int) or baseline["violation_count"] < 0:
+        if not valid_integer(baseline.get("violation_count"), minimum=0):
             errors.append(f"{prefix}.violation_count must be a non-negative integer")
 
     debt_ids: set[str] = set()
-    for index, debt in enumerate(registry.get("cleanup_debts", [])):
+    for index, debt in enumerate(collections["cleanup_debts"]):
         prefix = f"cleanup_debts[{index}]"
         if not isinstance(debt, dict):
             errors.append(f"{prefix} must be an object")
@@ -1243,15 +1385,17 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"duplicate cleanup debt id: {debt_id}")
         else:
             debt_ids.add(debt_id)
-        if debt.get("control_id") not in seen:
+        debt_control = debt.get("control_id")
+        if not isinstance(debt_control, str) or debt_control not in seen:
             errors.append(f"{prefix}.control_id references an unknown control")
-        if debt.get("baseline_ref") not in baseline_ids:
+        debt_baseline = debt.get("baseline_ref")
+        if not isinstance(debt_baseline, str) or debt_baseline not in baseline_ids:
             errors.append(f"{prefix}.baseline_ref references an unknown baseline")
         if not non_empty_strings(debt.get("scope")):
             errors.append(f"{prefix}.scope must be a non-empty string list")
         if not isinstance(debt.get("owner"), str) or not debt["owner"].strip():
             errors.append(f"{prefix}.owner is required")
-        if debt.get("status") not in DEBT_STATUSES:
+        if not valid_enum(debt.get("status"), DEBT_STATUSES):
             errors.append(f"{prefix}.status is invalid")
         if not valid_timestamp(debt.get("delete_by")):
             errors.append(f"{prefix}.delete_by must be a timezone-aware timestamp")
@@ -1259,7 +1403,7 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.rationale is required")
 
     exemption_ids: set[str] = set()
-    for index, exemption in enumerate(registry.get("design_scope_exemptions", [])):
+    for index, exemption in enumerate(collections["design_scope_exemptions"]):
         prefix = f"design_scope_exemptions[{index}]"
         if not isinstance(exemption, dict):
             errors.append(f"{prefix} must be an object")
@@ -1279,7 +1423,8 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"duplicate design exemption id: {exemption_id}")
         else:
             exemption_ids.add(exemption_id)
-        if exemption.get("control_id") not in seen:
+        exemption_control = exemption.get("control_id")
+        if not isinstance(exemption_control, str) or exemption_control not in seen:
             errors.append(f"{prefix}.control_id references an unknown control")
         if not non_empty_strings(exemption.get("scope")):
             errors.append(f"{prefix}.scope must be a non-empty string list")
@@ -1291,14 +1436,14 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.alternative_control_refs must be a non-empty string list")
         elif not set(alternatives) <= seen:
             errors.append(f"{prefix}.alternative_control_refs contains unknown controls")
-        if exemption.get("status") not in EXEMPTION_STATUSES:
+        if not valid_enum(exemption.get("status"), EXEMPTION_STATUSES):
             errors.append(f"{prefix}.status is invalid")
         for field in ("reviewed_at", "review_by"):
             if not valid_timestamp(exemption.get(field)):
                 errors.append(f"{prefix}.{field} must be a timezone-aware timestamp")
 
     rule_ids: set[str] = set()
-    for index, mapping in enumerate(registry.get("federated_rule_mappings", [])):
+    for index, mapping in enumerate(collections["federated_rule_mappings"]):
         prefix = f"federated_rule_mappings[{index}]"
         if not isinstance(mapping, dict):
             errors.append(f"{prefix} must be an object")
@@ -1328,7 +1473,7 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.source_selector must be an object")
         else:
             errors.extend(unknown_fields(selector, {"kind", "value", "occurrence"}, f"{prefix}.source_selector"))
-            if selector.get("kind") not in {"whole_file", "markdown_heading"}:
+            if not valid_enum(selector.get("kind"), {"whole_file", "markdown_heading"}):
                 errors.append(f"{prefix}.source_selector.kind is invalid")
             if selector.get("kind") == "whole_file":
                 if selector.get("value") is not None or selector.get("occurrence") is not None:
@@ -1336,11 +1481,10 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             elif (
                 not isinstance(selector.get("value"), str)
                 or not selector["value"].startswith("#")
-                or not isinstance(selector.get("occurrence"), int)
-                or selector["occurrence"] < 1
+                or not valid_integer(selector.get("occurrence"), minimum=1)
             ):
                 errors.append(f"{prefix}.source_selector markdown heading is invalid")
-        if mapping.get("disposition") not in FEDERATION_DISPOSITIONS:
+        if not valid_enum(mapping.get("disposition"), FEDERATION_DISPOSITIONS):
             errors.append(f"{prefix}.disposition is invalid")
         if not isinstance(mapping.get("semantic_owner"), str) or not mapping["semantic_owner"].strip():
             errors.append(f"{prefix}.semantic_owner is required")
@@ -1352,7 +1496,7 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.control_refs must reference known controls")
         if not isinstance(mapping.get("mandatory"), bool):
             errors.append(f"{prefix}.mandatory must be boolean")
-        if mapping.get("status") not in FEDERATION_STATUSES:
+        if not valid_enum(mapping.get("status"), FEDERATION_STATUSES):
             errors.append(f"{prefix}.status is invalid")
         if not valid_timestamp(mapping.get("observed_at")):
             errors.append(f"{prefix}.observed_at must be a timezone-aware timestamp")
@@ -1364,21 +1508,38 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.reviewed_at must be a timezone-aware timestamp")
 
     for index, control in enumerate(controls):
+        if not isinstance(control, dict):
+            continue
         if (
             control.get("applies") is False
-            and control.get("applicability_exemption_ref") not in exemption_ids
+            and (
+                not isinstance(control.get("applicability_exemption_ref"), str)
+                or control["applicability_exemption_ref"] not in exemption_ids
+            )
         ):
             errors.append(f"controls[{index}].applicability_exemption_ref references an unknown exemption")
         if control.get("evaluation_mode") != "ratchet_delta":
             continue
-        baseline_ref = control.get("ratchet_policy", {}).get("baseline_ref")
-        if baseline_ref not in baseline_ids:
+        ratchet_policy = control.get("ratchet_policy")
+        baseline_ref = (
+            ratchet_policy.get("baseline_ref")
+            if isinstance(ratchet_policy, dict) else None
+        )
+        if not isinstance(baseline_ref, str) or baseline_ref not in baseline_ids:
             errors.append(f"controls[{index}].ratchet_policy.baseline_ref references an unknown baseline")
     return errors
 
 
-def validate_traceability(graph: dict[str, Any], registry: dict[str, Any]) -> list[str]:
+def validate_traceability(graph: Any, registry: Any) -> list[str]:
+    if not isinstance(graph, dict):
+        return ["traceability graph must be an object"]
+    registry_object = registry if isinstance(registry, dict) else {}
     errors: list[str] = []
+    errors.extend(unknown_fields(
+        graph,
+        {"schema_version", "generated_from_registry_sha256", "links"},
+        "traceability graph",
+    ))
     if graph.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"traceability graph schema_version must be {SCHEMA_VERSION}")
     if graph.get("generated_from_registry_sha256") != canonical_digest(registry):
@@ -1386,8 +1547,26 @@ def validate_traceability(graph: dict[str, Any], registry: dict[str, Any]) -> li
     links = graph.get("links")
     if not isinstance(links, list):
         return errors + ["traceability graph links must be an array"]
-    linked = {link.get("control_id") for link in links if isinstance(link, dict)}
-    expected = {control.get("id") for control in registry.get("controls", [])}
+    linked = {
+        link["control_id"]
+        for link in links
+        if (
+            isinstance(link, dict)
+            and isinstance(link.get("control_id"), str)
+            and link["control_id"]
+        )
+    }
+    controls = registry_object.get("controls")
+    control_items = controls if isinstance(controls, list) else []
+    expected = {
+        control["id"]
+        for control in control_items
+        if (
+            isinstance(control, dict)
+            and isinstance(control.get("id"), str)
+            and control["id"]
+        )
+    }
     missing = sorted(item for item in expected - linked if item)
     if missing:
         errors.append(f"traceability graph is missing controls: {', '.join(missing)}")
@@ -1395,10 +1574,24 @@ def validate_traceability(graph: dict[str, Any], registry: dict[str, Any]) -> li
         if not isinstance(link, dict):
             errors.append(f"traceability links[{index}] must be an object")
             continue
+        if not isinstance(link.get("control_id"), str) or not link["control_id"]:
+            errors.append(f"traceability links[{index}].control_id is required")
+        errors.extend(unknown_fields(
+            link,
+            {
+                "requirement_ids", "risk_ids", "control_id",
+                "verification_ids", "evidence_required",
+            },
+            f"traceability links[{index}]",
+        ))
         for field in ("requirement_ids", "risk_ids", "verification_ids", "evidence_required"):
             values = link.get(field)
-            if not isinstance(values, list) or not values:
-                errors.append(f"traceability links[{index}].{field} must be non-empty")
+            if not non_empty_strings(values):
+                errors.append(
+                    f"traceability links[{index}].{field} must be a non-empty string list",
+                )
+    if isinstance(registry, dict) and graph != build_traceability_graph(registry):
+        errors.append("traceability graph content does not match the control registry")
     return errors
 
 
@@ -1434,7 +1627,9 @@ def _validate_hash_chain(entries: Any, collection: str) -> list[str]:
     return errors
 
 
-def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[str]:
+def validate_ledger(ledger: Any, root: Path | None = None) -> list[str]:
+    if not isinstance(ledger, dict):
+        return ["evidence ledger must be an object"]
     errors: list[str] = []
     errors.extend(unknown_fields(
         ledger, {"schema_version", "runs", "audits", "claims"}, "ledger",
@@ -1442,16 +1637,20 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
     if ledger.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"evidence ledger schema_version must be {SCHEMA_VERSION}; seal the old plane and regenerate")
     runs = ledger.get("runs")
+    audits = ledger.get("audits")
+    claims = ledger.get("claims")
     errors.extend(_validate_hash_chain(runs, "runs"))
-    errors.extend(_validate_hash_chain(ledger.get("audits"), "audits"))
-    errors.extend(_validate_hash_chain(ledger.get("claims"), "claims"))
+    errors.extend(_validate_hash_chain(audits, "audits"))
+    errors.extend(_validate_hash_chain(claims, "claims"))
     if not isinstance(runs, list):
         return errors
+    audit_items = audits if isinstance(audits, list) else []
+    claim_items = claims if isinstance(claims, list) else []
     for index, run in enumerate(runs):
         prefix = f"runs[{index}]"
         if not isinstance(run, dict):
             continue
-        if run.get("conclusion") not in {"PASS", "FAIL", "BLOCKED", "DISPUTED"}:
+        if not valid_enum(run.get("conclusion"), {"PASS", "FAIL", "BLOCKED", "DISPUTED"}):
             errors.append(f"{prefix}.conclusion is invalid")
         errors.extend(validate_subject_binding(run.get("subject_binding"), f"{prefix}.subject_binding"))
         storage = run.get("storage_binding")
@@ -1462,14 +1661,18 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
         for field in ("actor", "authority_id", "execution_context"):
             if not isinstance(run.get(field), str) or not run[field].strip():
                 errors.append(f"{prefix}.{field} is required")
-        if run.get("audit_stage") not in AUDIT_STAGES:
+        if not valid_enum(run.get("audit_stage"), AUDIT_STAGES):
             errors.append(f"{prefix}.audit_stage is invalid")
         reviewed = run.get("reviewed_run_ids")
         if not isinstance(reviewed, list) or any(not isinstance(item, str) or not item for item in reviewed):
             errors.append(f"{prefix}.reviewed_run_ids must be a string array")
         if run.get("audit_stage") != "self" and not reviewed:
             errors.append(f"{prefix}.reviewed_run_ids is required for independent audit")
-        for result_index, result in enumerate(run.get("results", [])):
+        results = run.get("results")
+        if not isinstance(results, list):
+            errors.append(f"{prefix}.results must be an array")
+            results = []
+        for result_index, result in enumerate(results):
             if not isinstance(result, dict):
                 errors.append(f"{prefix}.results[{result_index}] must be an object")
                 continue
@@ -1511,7 +1714,7 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
                         or not safe_relative_path(artifact.get("path"))
                         or not safe_relative_path(artifact.get("evidence_ref"))
                         or not valid_sha256(artifact.get("sha256"))
-                        or not isinstance(artifact.get("bytes"), int)
+                        or not valid_integer(artifact.get("bytes"), minimum=0)
                     ):
                         errors.append(f"{artifact_prefix} has an invalid evidence binding")
                     elif root is not None:
@@ -1533,31 +1736,34 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
         if not isinstance(run, dict) or run.get("audit_stage") == "self":
             continue
         prefix = f"runs[{index}]"
-        for reviewed_id in run.get("reviewed_run_ids", []):
+        for reviewed_id in string_items(run.get("reviewed_run_ids")):
             source = runs_by_id.get(reviewed_id)
             if source is None:
                 errors.append(f"{prefix}.reviewed_run_ids references an unknown run")
                 continue
-            if source.get("audit_stage") != predecessor.get(run.get("audit_stage")):
+            audit_stage = run.get("audit_stage")
+            expected_stage = predecessor.get(audit_stage) if isinstance(audit_stage, str) else None
+            if source.get("audit_stage") != expected_stage:
                 errors.append(f"{prefix} reviews the wrong predecessor stage")
             if source.get("authority_id") == run.get("authority_id"):
                 errors.append(f"{prefix} reuses the reviewed authority identity")
             if source.get("execution_context") == run.get("execution_context"):
                 errors.append(f"{prefix} reuses the reviewed execution context")
-    for index, audit in enumerate(ledger.get("audits", [])):
+    for index, audit in enumerate(audit_items):
         if not isinstance(audit, dict):
             continue
         prefix = f"audits[{index}]"
-        if audit.get("audit_stage") not in AUDIT_STAGES - {"self"}:
+        if not valid_enum(audit.get("audit_stage"), AUDIT_STAGES - {"self"}):
             errors.append(f"{prefix}.audit_stage must be an independent stage")
-        if audit.get("conclusion") not in {"PASS", "FAIL", "BLOCKED", "DISPUTED"}:
+        if not valid_enum(audit.get("conclusion"), {"PASS", "FAIL", "BLOCKED", "DISPUTED"}):
             errors.append(f"{prefix}.conclusion is invalid")
         errors.extend(validate_subject_binding(audit.get("subject_binding"), f"{prefix}.subject_binding"))
         if not non_empty_strings(audit.get("reviewed_run_ids")):
             errors.append(f"{prefix}.reviewed_run_ids must be non-empty")
         elif not set(audit["reviewed_run_ids"]) <= set(runs_by_id):
             errors.append(f"{prefix}.reviewed_run_ids references unknown runs")
-        audited_run = runs_by_id.get(audit.get("run_id"))
+        audit_run_id = audit.get("run_id")
+        audited_run = runs_by_id.get(audit_run_id) if isinstance(audit_run_id, str) else None
         if audited_run is None:
             errors.append(f"{prefix}.run_id references an unknown run")
         elif any(
@@ -1576,13 +1782,13 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
             or storage.get("run_entry_sha256") != audited_run.get("entry_sha256")
         ):
             errors.append(f"{prefix}.storage_binding does not match its audit run")
-    for index, claim in enumerate(ledger.get("claims", [])):
+    for index, claim in enumerate(claim_items):
         if not isinstance(claim, dict):
             continue
         prefix = f"claims[{index}]"
-        if claim.get("claim_scope") not in CLAIM_SCOPES:
+        if not valid_enum(claim.get("claim_scope"), CLAIM_SCOPES):
             errors.append(f"{prefix}.claim_scope is invalid")
-        if claim.get("outcome") not in {"COMPLETED", "PASS"}:
+        if not valid_enum(claim.get("outcome"), {"COMPLETED", "PASS"}):
             errors.append(f"{prefix}.outcome is invalid")
         errors.extend(validate_subject_binding(claim.get("subject_binding"), f"{prefix}.subject_binding"))
         if not non_empty_strings(claim.get("control_ids")):
@@ -1591,6 +1797,10 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
         if not non_empty_strings(supporting) or not set(supporting) <= set(runs_by_id):
             errors.append(f"{prefix}.supporting_run_ids references unknown runs")
             continue
+        audit_stages = claim.get("audit_stages")
+        if not non_empty_strings(audit_stages):
+            errors.append(f"{prefix}.audit_stages must be a non-empty string list")
+            audit_stages = []
         for run_id in supporting:
             run = runs_by_id[run_id]
             if (
@@ -1598,7 +1808,7 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
                 or claim.get("target_maturity") != run.get("target_maturity")
             ):
                 errors.append(f"{prefix} has stale supporting run {run_id}")
-            if run.get("audit_stage") not in claim.get("audit_stages", []):
+            if run.get("audit_stage") not in audit_stages:
                 errors.append(f"{prefix} includes a run from an undeclared audit stage")
         storage = claim.get("storage_binding")
         if not isinstance(storage, dict) or set(storage) != {
@@ -1606,13 +1816,24 @@ def validate_ledger(ledger: dict[str, Any], root: Path | None = None) -> list[st
         }:
             errors.append(f"{prefix}.storage_binding is invalid")
         else:
-            run_heads = {"GENESIS", *(run.get("entry_sha256") for run in runs if isinstance(run, dict))}
+            run_heads = {
+                "GENESIS",
+                *(
+                    run["entry_sha256"] for run in runs
+                    if isinstance(run, dict) and isinstance(run.get("entry_sha256"), str)
+                ),
+            }
             audit_heads = {
                 "GENESIS",
-                *(audit.get("entry_sha256") for audit in ledger.get("audits", []) if isinstance(audit, dict)),
+                *(
+                    audit["entry_sha256"] for audit in audit_items
+                    if isinstance(audit, dict) and isinstance(audit.get("entry_sha256"), str)
+                ),
             }
-            if storage.get("runs_chain_head_sha256") not in run_heads:
+            runs_head = storage.get("runs_chain_head_sha256")
+            if not isinstance(runs_head, str) or runs_head not in run_heads:
                 errors.append(f"{prefix}.storage_binding references an unknown run chain head")
-            if storage.get("audits_chain_head_sha256") not in audit_heads:
+            audits_head = storage.get("audits_chain_head_sha256")
+            if not isinstance(audits_head, str) or audits_head not in audit_heads:
                 errors.append(f"{prefix}.storage_binding references an unknown audit chain head")
     return errors

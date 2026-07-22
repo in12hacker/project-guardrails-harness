@@ -59,6 +59,22 @@ artifact paths with VCS attributes such as `-text -diff`, but must not infer tha
 classification merely from a filename or promote project-specific bundle roots
 into the portable Skill.
 
+External acquisition and safe publication are separate lifecycle stages. When
+the raw artifact may contain secrets, paid-service content, personal data, or
+binary captures, the project must declare its raw birth root, acquisition
+owner, authorization, immutable snapshot identity, retention, redaction or
+exclusion decision, and publication root before execution. Copying a raw file
+out of the repository after first creating it there does not satisfy an
+external-from-birth policy. Directory scans used for hostile or concurrently
+mutable acquisition must preserve opened-object identity rather than validate a
+pathname and reopen it later. A binary artifact is not publishable merely
+because text redaction found nothing.
+
+These acquisition fields are not present in the v3 ledger. Until a future
+schema models them, projects must keep their acquisition envelope and harness
+project-owned and treat missing lifecycle closure as `NOT_EVALUATED` or
+`BLOCKED`, never as a portable Skill `PASS`.
+
 The executable protocol enforces this with three separate bindings: `actor` is
 only a display label, `authority_id` identifies a manifest-registered responsible authority, and
 `execution_context` identifies the session/runner/organization boundary.

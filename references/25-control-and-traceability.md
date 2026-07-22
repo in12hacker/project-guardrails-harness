@@ -164,6 +164,9 @@ The generated framework must test itself:
 - source-ref deduplication and permanent exclusion of generated control planes;
 - two-run canonical-digest idempotency;
 - candidate validation before a rollback-capable transactional replacement;
+- read-only help/check/plan behavior, expected-input binding, exact write-set
+  closure, zero-write convergence, stale-plan rejection, protected-scope
+  preservation, and injected-failure rollback for every control-plane mutator;
 - bounded, aggregated diagnostics with count and representative samples.
 
 ## Semantic Closure
@@ -174,3 +177,9 @@ positive and adversarial drift tests, and generated guidance derived from the
 machine model. If any representation is missing, treat the behavior as an
 unenforced design intent; a project adapter may report observations but must not
 invent the missing status or claim policy.
+
+Generated control-plane state adds a sixth constraint: mutation authority is
+separate from semantic authority. A generator may write only its declared
+machine-owned paths and must prove that project-owned paths remain unchanged.
+Byte-identical output alone is insufficient when a nominally read-only mode
+performed transient writes, rewrote metadata, or left temporary files.

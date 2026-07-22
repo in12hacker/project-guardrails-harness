@@ -306,6 +306,76 @@ compatibility review. If future integration needs new ledger fields, treat it
 as a next-schema design; do not extend v3 silently and do not add a compatibility
 reader.
 
+## Control-Plane Mutation Harness Candidates
+
+Use this proposal model for project adapters, regenerators, migrations,
+formatters, and configuration tools that can rewrite normative or derived
+state. It is deliberately separate from execution-closure evidence: the proof
+subject is a state transition, not a product effect. Candidate validation is
+offline structure/closure validation and never executes the declared command.
+
+```text
+MutationContract:
+  operation_id:
+  owner:
+  command_sha256:
+  mutable_paths:                  # exact canonical write boundary
+  protected_paths:                # project-owned preservation boundary
+  protection_rationale:           # required, including when protected_paths is empty
+  planned_output_sha256:
+
+MutationObservation:
+  observation_id:
+  kind: help|invalid_invocation|check_clean|check_drift|plan|apply|repeat_apply|stale_plan|injected_failure
+  sequence:
+  run_id:
+  command_sha256:
+  environment_sha256:
+  execution_state: executed
+  outcome:
+  exit_code:
+  input_tree_sha256:
+  expected_input_sha256:
+  output_tree_sha256:
+  protected_tree_sha256:
+  plan_sha256:
+  planned_write_set:
+  attempted_write_set:
+  committed_write_set:
+  residual_paths:
+  artifact_ref:
+  artifact_sha256:
+```
+
+The candidate requires exactly one observation of every kind. Help, invalid
+invocation, clean/drift check, and plan are read-only. Plan declares the exact
+write set. Apply binds the same plan and expected input, writes exactly the
+declared paths, preserves the protected digest, and reaches the declared output
+digest. Repeating apply against that output performs no attempted or committed
+writes. A stale-plan fixture starts from an independent conflicting digest and
+must reject before writing. An injected failure must attempt a non-empty subset
+of the allowed paths, restore the original digest, commit nothing, and leave no
+residual path. Every observation binds one command and environment identity.
+An empty protected path set is allowed only as an explicit reviewed boundary;
+the rationale remains mandatory so greenfield/full-ownership tools do not force
+invented paths and brownfield tools cannot silently erase preservation scope.
+
+This is stricter than comparing final bytes twice: a tool that rewrites the
+same bytes, mutates timestamps, touches undeclared paths, accepts a stale plan,
+or cleans up only on its success path is not a conforming mutator. Project
+harnesses own how filesystem observations are collected and how command modes
+map to these semantic kinds.
+
+```bash
+python3 "$SKILL_DIR/scripts/validate_mutator_candidate.py" candidate.json
+python3 -m unittest -v \
+  tests.test_quality_framework.QualityFrameworkTest.test_mutator_candidate_requires_read_only_checks_and_transactional_convergence
+```
+
+Format `1.0` is a proposal outside the v3 evidence ledger. A structurally valid
+candidate still needs project-owner review, real command execution, positive
+and adversarial fixtures, and an explicit control integration decision.
+
 ## Interface Contract Checks
 
 ```text
@@ -323,6 +393,12 @@ InterfaceContractHarness:
 ```
 
 Check that public interfaces are shaped by real consumers, use typed domain boundaries, separate wire DTOs from domain types, and avoid long-lived compatibility wrappers.
+
+The verifier must consume the producer's real, versioned outcome contract. Bind
+producer and verifier to the same contract digest and test success, typed
+failure, empty/minimal success bodies, unknown fields, and postcondition truth.
+A verifier-created response shape or a static call-reachability check cannot
+substitute for producer behavior.
 
 ## API Stability Checks
 

@@ -180,10 +180,19 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      read-only; `--apply` accepts only a declared compatible same-schema update,
      increments an active campaign revision, preserves project-owned guidance,
      synchronizes traceability, and reports controls that must rerun.
+   - Treat every project adapter, regenerator, migrator, and control-plane
+     configurator as a mutator with an explicit write contract. Help, invalid
+     invocation, check, and plan observations must be read-only; apply must bind
+     the validated input and exact write set; a second apply must converge
+     without writes; stale-input and injected-failure fixtures must reject or
+     roll back without residue. Validate the portable proposal before an owner
+     promotes it into project controls. `CANDIDATE_VALID` is never `PASS`.
 
    ```bash
    python3 "$SKILL_DIR/scripts/review_skill_update.py" --root . --check
    python3 "$SKILL_DIR/scripts/review_skill_update.py" --root . --apply
+   python3 "$SKILL_DIR/scripts/validate_mutator_candidate.py" \
+     /path/to/project-owned-mutator-candidate.json
    ```
 
    ```bash

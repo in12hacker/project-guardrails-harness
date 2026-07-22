@@ -24,6 +24,7 @@ LINT_CAMPAIGN = ROOT / "scripts" / "lint_campaign.py"
 REVIEW_UPDATE = ROOT / "scripts" / "review_skill_update.py"
 READINESS = ROOT / "scripts" / "assess_readiness.py"
 HARNESS_CANDIDATE = ROOT / "scripts" / "validate_harness_candidate.py"
+MUTATOR_CANDIDATE = ROOT / "scripts" / "validate_mutator_candidate.py"
 HANDOFF = ROOT / "scripts" / "render_task_handoff.py"
 SEAL = ROOT / "scripts" / "seal_evidence.py"
 PREFLIGHT = ROOT / "templates" / "preflight.py"
@@ -3053,6 +3054,202 @@ class QualityFrameworkTest(unittest.TestCase):
                         sample["message"] for sample in report["diagnostics"]["samples"]
                     )
                     self.assertIn(expected_diagnostics[name], messages)
+
+    def test_mutator_candidate_requires_read_only_checks_and_transactional_convergence(self) -> None:
+        baseline = "a" * 64
+        environment = "b" * 64
+        command = "c" * 64
+        planned_output = "d" * 64
+        protected = "e" * 64
+        plan = "f" * 64
+        drift = "1" * 64
+        conflict = "2" * 64
+        mutable_paths = [
+            ".guardrails/control-registry.yaml",
+            ".guardrails/traceability-graph.json",
+        ]
+        protected_paths = [
+            ".guardrails/decisions.md",
+            ".guardrails/memory.md",
+        ]
+        kinds = [
+            "help", "invalid_invocation", "check_clean", "check_drift", "plan",
+            "apply", "repeat_apply", "stale_plan", "injected_failure",
+        ]
+        outcomes = {
+            "help": "reported",
+            "invalid_invocation": "usage_rejected",
+            "check_clean": "clean",
+            "check_drift": "drift_detected",
+            "plan": "planned",
+            "apply": "applied",
+            "repeat_apply": "no_change",
+            "stale_plan": "stale_input_rejected",
+            "injected_failure": "rolled_back",
+        }
+        candidate = {
+            "candidate_version": "1.0",
+            "candidate_status": "proposal",
+            "owner_review": {"status": "pending", "owner": "quality", "reviewed_at": None},
+            "compatibility": {
+                "evidence_ledger_schema_change": False,
+                "ledger_integration": "not_proposed",
+            },
+            "run": {
+                "run_id": "MUTATION-RUN-1",
+                "subject_sha256": baseline,
+                "environment_sha256": environment,
+            },
+            "mutation_contract": {
+                "operation_id": "CONTROL-PLANE-REGENERATOR",
+                "owner": "quality-owner",
+                "command_sha256": command,
+                "mutable_paths": mutable_paths,
+                "protected_paths": protected_paths,
+                "protection_rationale": "preserve project-owned decisions and memory",
+                "planned_output_sha256": planned_output,
+            },
+            "observations": [],
+        }
+        for sequence, kind in enumerate(kinds, start=1):
+            input_digest = baseline
+            expected_input = baseline
+            output_digest = baseline
+            planned: list[str] = []
+            attempted: list[str] = []
+            committed: list[str] = []
+            plan_digest = None
+            if kind == "check_drift":
+                input_digest = expected_input = output_digest = drift
+            elif kind == "plan":
+                planned = mutable_paths
+                plan_digest = plan
+            elif kind == "apply":
+                planned = attempted = committed = mutable_paths
+                output_digest = planned_output
+                plan_digest = plan
+            elif kind == "repeat_apply":
+                input_digest = expected_input = output_digest = planned_output
+            elif kind == "stale_plan":
+                input_digest = output_digest = conflict
+                planned = mutable_paths
+                plan_digest = plan
+            elif kind == "injected_failure":
+                attempted = mutable_paths[:1]
+            candidate["observations"].append({
+                "observation_id": f"OBS-{kind}",
+                "kind": kind,
+                "sequence": sequence,
+                "run_id": "MUTATION-RUN-1",
+                "command_sha256": command,
+                "environment_sha256": environment,
+                "execution_state": "executed",
+                "outcome": outcomes[kind],
+                "exit_code": 0 if kind in {
+                    "help", "check_clean", "plan", "apply", "repeat_apply",
+                } else 1,
+                "input_tree_sha256": input_digest,
+                "expected_input_sha256": expected_input,
+                "output_tree_sha256": output_digest,
+                "protected_tree_sha256": protected,
+                "plan_sha256": plan_digest,
+                "planned_write_set": planned,
+                "attempted_write_set": attempted,
+                "committed_write_set": committed,
+                "residual_paths": [],
+                "artifact_ref": f"evidence/mutator/{kind}.json",
+                "artifact_sha256": hashlib.sha256(kind.encode()).hexdigest(),
+            })
+
+        fixture = Path(tempfile.mkdtemp(prefix="mutator-candidate-test-")) / "candidate.json"
+
+        def validate(value: dict) -> subprocess.CompletedProcess[str]:
+            fixture.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, str(MUTATOR_CANDIDATE), str(fixture)],
+                check=False, capture_output=True, text=True,
+            )
+
+        accepted = validate(candidate)
+        self.assertEqual(0, accepted.returncode, accepted.stdout + accepted.stderr)
+        report = json.loads(accepted.stdout)
+        self.assertEqual("CANDIDATE_VALID", report["status"])
+        self.assertEqual("PROPOSAL_ONLY", report["assurance_status"])
+        self.assertNotIn('"status": "PASS"', accepted.stdout)
+
+        full_ownership = copy.deepcopy(candidate)
+        full_ownership["mutation_contract"].update(
+            protected_paths=[],
+            protection_rationale="greenfield output has one reviewed semantic owner",
+        )
+        accepted_full_ownership = validate(full_ownership)
+        self.assertEqual(
+            0,
+            accepted_full_ownership.returncode,
+            accepted_full_ownership.stdout + accepted_full_ownership.stderr,
+        )
+
+        def observation(value: dict, kind: str) -> dict:
+            return next(item for item in value["observations"] if item["kind"] == kind)
+
+        mutations = {
+            "help_writes": lambda value: observation(value, "help").update(
+                committed_write_set=mutable_paths[:1],
+            ),
+            "check_drift_mutates": lambda value: observation(value, "check_drift").update(
+                output_tree_sha256=planned_output,
+            ),
+            "invented_write": lambda value: observation(value, "apply").update(
+                committed_write_set=[".guardrails/unknown.json"],
+            ),
+            "non_idempotent_repeat": lambda value: observation(value, "repeat_apply").update(
+                attempted_write_set=mutable_paths,
+            ),
+            "stale_plan_applied": lambda value: observation(value, "stale_plan").update(
+                output_tree_sha256=planned_output,
+            ),
+            "rollback_residue": lambda value: observation(value, "injected_failure").update(
+                residual_paths=[".guardrails/.partial.tmp"],
+            ),
+            "protected_scope_changed": lambda value: observation(value, "apply").update(
+                protected_tree_sha256="3" * 64,
+            ),
+            "plan_substitution": lambda value: observation(value, "apply").update(
+                plan_sha256="4" * 64,
+            ),
+            "missing_invalid_invocation": lambda value: value["observations"].remove(
+                observation(value, "invalid_invocation"),
+            ),
+            "ledger_promotion": lambda value: value["compatibility"].update(
+                ledger_integration="proposed",
+            ),
+            "no_state_transition": lambda value: value["mutation_contract"].update(
+                planned_output_sha256=baseline,
+            ),
+            "nested_scope_overlap": lambda value: value["mutation_contract"].update(
+                protected_paths=[".guardrails"],
+            ),
+            "missing_protection_rationale": lambda value: value["mutation_contract"].update(
+                protection_rationale="",
+            ),
+            "owner_status_object": lambda value: value["owner_review"].update(
+                status={},
+            ),
+            "kind_object": lambda value: value["observations"][0].update(kind={}),
+            "input_digest_object": lambda value: observation(value, "check_drift").update(
+                input_tree_sha256={},
+            ),
+            "write_set_object": lambda value: observation(value, "apply").update(
+                committed_write_set=[{}],
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                rejected_candidate = copy.deepcopy(candidate)
+                mutate(rejected_candidate)
+                rejected = validate(rejected_candidate)
+                self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
+                self.assertEqual("CANDIDATE_REJECTED", json.loads(rejected.stdout)["status"])
 
     def test_seal_rejects_archive_id_path_escape(self) -> None:
         project = self.make_project()

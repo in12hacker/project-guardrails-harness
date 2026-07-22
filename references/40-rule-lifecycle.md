@@ -205,6 +205,15 @@ conflict makes it disputed and blocks the affected claim. An unmapped mandatory
 project rule is a framework failure. Generated Markdown is a derived view and
 must never resolve or overwrite a federation conflict.
 
+Federated sources must also declare their relationship. `authority` selects the
+semantic owner; `fallback` permits a lower-priority source only when the higher
+source is absent; `corroboration` requires independently observed sources to
+agree. Never implement corroboration with first-nonempty fallback logic: a
+missing or contradictory corroborating source is a typed blocker, not permission
+to continue with the remaining value. Because v3 mappings do not encode this
+relationship, projects retain the explicit relation until a future schema owns
+it; prose precedence alone cannot create a PASS.
+
 ## Continuous Update Loop
 
 Run this loop after each meaningful coding task, PR, audit, incident, milestone closeout, or repeated review finding:

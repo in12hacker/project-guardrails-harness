@@ -56,6 +56,19 @@ READ_ONLY_KINDS = {
     "repeat_apply",
     "stale_plan",
 }
+WRITE_SET_FIELDS = (
+    "planned_write_set",
+    "attempted_write_set",
+    "committed_write_set",
+    "residual_paths",
+)
+WRITE_SET_OWNER_KINDS = {
+    "planned_write_set": {"plan", "apply", "stale_plan"},
+    "attempted_write_set": {"apply", "injected_failure"},
+    "committed_write_set": {"apply"},
+    "residual_paths": set(),
+}
+PLAN_BINDING_KINDS = {"plan", "apply", "stale_plan"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -289,7 +302,7 @@ def validate_candidate(candidate: dict) -> list[str]:
     sequences: set[int] = set()
     artifacts: set[str] = set()
     protected_digest: str | None = None
-    parsed: list[tuple[str, dict, list[str], list[str], list[str], list[str]]] = []
+    parsed: list[tuple[str, dict, dict[str, list[str]]]] = []
     for index, raw in enumerate(observations):
         path = f"candidate.observations[{index}]"
         item_errors, item = exact_object(raw, observation_fields, path)
@@ -341,9 +354,11 @@ def validate_candidate(candidate: dict) -> list[str]:
             "artifact_sha256",
         ):
             require_digest(item.get(field), f"{path}.{field}", errors)
-        require_digest(
-            item.get("plan_sha256"), f"{path}.plan_sha256", errors, nullable=True
-        )
+        plan_sha256 = item.get("plan_sha256")
+        if kind in PLAN_BINDING_KINDS:
+            require_digest(plan_sha256, f"{path}.plan_sha256", errors)
+        elif plan_sha256 is not None:
+            errors.append(f"{path}.plan_sha256 is not allowed for {kind or '<invalid>'}")
         current_protected = item.get("protected_tree_sha256")
         if valid_sha256(current_protected):
             if protected_digest is None:
@@ -352,18 +367,19 @@ def validate_candidate(candidate: dict) -> list[str]:
                 errors.append(
                     "protected scope digest changed across mutator observations"
                 )
-        set_values: list[list[str]] = []
-        for field in (
-            "planned_write_set",
-            "attempted_write_set",
-            "committed_write_set",
-            "residual_paths",
-        ):
+        write_sets: dict[str, list[str]] = {}
+        for field in WRITE_SET_FIELDS:
             set_errors, values = path_list(
                 item.get(field), f"{path}.{field}", allow_empty=True
             )
             errors.extend(set_errors)
-            set_values.append(values)
+            write_sets[field] = values
+            if values and kind not in WRITE_SET_OWNER_KINDS[field]:
+                errors.append(
+                    f"{path}.{field} is not allowed for {kind or '<invalid>'}"
+                )
+            elif not values and kind in WRITE_SET_OWNER_KINDS[field]:
+                errors.append(f"{path}.{field} must be non-empty for {kind}")
         artifact_ref = item.get("artifact_ref")
         if not canonical_relative_path(artifact_ref):
             errors.append(
@@ -373,7 +389,7 @@ def validate_candidate(candidate: dict) -> list[str]:
             errors.append(f"duplicate observation artifact_ref: {artifact_ref}")
         else:
             artifacts.add(artifact_ref)
-        parsed.append((kind, item, *set_values))
+        parsed.append((kind, item, write_sets))
 
     missing = OBSERVATION_KINDS - set(by_kind)
     extra = set(by_kind) - OBSERVATION_KINDS
@@ -390,9 +406,13 @@ def validate_candidate(candidate: dict) -> list[str]:
 
     baseline = run.get("subject_sha256")
     planned_output = contract.get("planned_output_sha256")
-    plan_digest: str | None = None
-    for kind, item, planned, attempted, committed, residual in parsed:
+    plan_value = by_kind.get("plan", {}).get("plan_sha256")
+    plan_digest = plan_value if valid_sha256(plan_value) else None
+    for kind, item, write_sets in parsed:
         path = f"candidate observation {kind or '<invalid>'}"
+        planned = write_sets["planned_write_set"]
+        attempted = write_sets["attempted_write_set"]
+        committed = write_sets["committed_write_set"]
         input_digest = item.get("input_tree_sha256")
         expected_input = item.get("expected_input_sha256")
         output_digest = item.get("output_tree_sha256")
@@ -404,19 +424,7 @@ def validate_candidate(candidate: dict) -> list[str]:
             )
         if kind in READ_ONLY_KINDS and input_digest != output_digest:
             errors.append(f"{path} changed its input tree")
-        if kind in READ_ONLY_KINDS and (attempted or committed or residual):
-            errors.append(f"{path} must have no writes or residual paths")
-        if (
-            kind not in {"plan", "apply", "stale_plan"}
-            and item.get("plan_sha256") is not None
-        ):
-            errors.append(f"{path} must not bind a plan")
         if kind == "plan":
-            plan_digest = (
-                item.get("plan_sha256")
-                if valid_sha256(item.get("plan_sha256"))
-                else None
-            )
             if planned != mutable_paths:
                 errors.append("plan planned_write_set must exactly match mutable_paths")
         elif kind == "apply":
@@ -428,13 +436,9 @@ def validate_candidate(candidate: dict) -> list[str]:
                 or committed != mutable_paths
             ):
                 errors.append("apply write sets must exactly match mutable_paths")
-            if residual:
-                errors.append("apply must not leave residual paths")
         elif kind == "repeat_apply":
             if input_digest != planned_output or expected_input != planned_output:
                 errors.append("repeat_apply must start from planned_output_sha256")
-            if planned or attempted or committed or residual:
-                errors.append("repeat_apply must converge without writes")
         elif kind == "check_clean":
             if input_digest != planned_output or expected_input != planned_output:
                 errors.append(
@@ -445,8 +449,6 @@ def validate_candidate(candidate: dict) -> list[str]:
                 errors.append(
                     "check_drift must evaluate candidate.run.subject_sha256 before apply"
                 )
-            if planned or attempted or committed or residual:
-                errors.append("check_drift must be read-only")
         elif kind == "stale_plan":
             if input_digest == baseline or input_digest == planned_output:
                 errors.append("stale_plan requires a conflicting input fixture")
@@ -459,17 +461,11 @@ def validate_candidate(candidate: dict) -> list[str]:
                 errors.append(
                     "injected_failure must attempt a non-empty subset of mutable_paths"
                 )
-            if output_digest != input_digest or committed or residual:
-                errors.append(
-                    "injected_failure must roll back fully without residual paths"
-                )
-            if planned:
-                errors.append("injected_failure must not claim a completed plan")
-        elif planned or attempted or committed or residual:
-            errors.append(f"{path} must have empty mutation sets")
+            if output_digest != input_digest:
+                errors.append("injected_failure must restore the input tree")
 
     if plan_digest is not None:
-        for kind in ("apply", "stale_plan"):
+        for kind in sorted(PLAN_BINDING_KINDS - {"plan"}):
             if kind in by_kind and by_kind[kind].get("plan_sha256") != plan_digest:
                 errors.append(f"{kind} does not bind the validated plan")
     ordered_kinds = ("check_drift", "plan", "apply", "check_clean", "repeat_apply")

@@ -5,5 +5,5 @@
   "affected_control_ids": [
     "*"
   ],
-  "summary": "Adds a portable proposal validator for control-plane mutators that requires a coherent drift-plan-apply-clean-repeat lifecycle, canonical write paths, typed input failure, expected-input and plan binding, exact write-set closure, protected-scope preservation, zero-write convergence, stale-plan rejection, and failure-atomic rollback; clarifies producer-verifier contract binding, external evidence birth/publication separation, and authority/fallback/corroboration semantics as project-owned gaps pending a future schema; no v3 ledger integration, compatibility reader, or schema change is introduced."
+  "summary": "Strengthens the portable control-plane mutator proposal validator with centralized, closed write-set permissions and mandatory shared plan binding across plan, apply, and stale-plan observations; retains the coherent drift-plan-apply-clean-repeat lifecycle, canonical paths, typed input failure, exact write-set closure, protected-scope preservation, zero-write convergence, stale-plan rejection, and failure-atomic rollback; no v3 ledger integration, compatibility reader, or schema change is introduced."
 }

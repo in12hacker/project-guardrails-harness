@@ -347,14 +347,20 @@ MutationObservation:
   artifact_sha256:
 ```
 
-The candidate requires exactly one observation of every kind. Help, invalid
-invocation, clean/drift check, and plan are read-only. Plan declares the exact
-write set. Apply binds the same plan and expected input, writes exactly the
-declared paths, preserves the protected digest, and reaches the declared output
-digest. Drift check evaluates the pre-apply subject; clean check evaluates the
-declared output; repeating apply against that output performs no attempted or
-committed writes. Their sequence is drift, plan, apply, clean, then repeat. A
-stale-plan fixture starts from an independent conflicting digest and
+The candidate requires exactly one observation of every kind. Write-set
+permissions are closed: only plan/apply/stale-plan may declare a non-empty
+planned set, only apply/injected-failure may declare attempted writes, only
+apply may declare committed writes, and no successful candidate may declare
+residual paths. Every permitted set is mandatory and non-empty for its owning
+kind. Only plan/apply/stale-plan may bind `plan_sha256`; all three must bind the
+same valid digest. Help, invalid invocation, clean/drift check, and plan are
+read-only. Plan declares the exact write set. Apply binds the same plan and
+expected input, writes exactly the declared paths, preserves the protected
+digest, and reaches the declared output digest. Drift check evaluates the
+pre-apply subject; clean check evaluates the declared output; repeating apply
+against that output performs no attempted or committed writes. Their sequence
+is drift, plan, apply, clean, then repeat. A stale-plan fixture starts from an
+independent conflicting digest and
 must reject before writing. An injected failure must attempt a non-empty subset
 of the allowed paths, restore the original digest, commit nothing, and leave no
 residual path. Every observation binds one command and environment identity.

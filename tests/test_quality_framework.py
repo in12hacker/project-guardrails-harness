@@ -3221,6 +3221,11 @@ class QualityFrameworkTest(unittest.TestCase):
                 expected_input_sha256=baseline,
                 output_tree_sha256=baseline,
             ),
+            "check_clean_plans_writes": lambda value: observation(
+                value, "check_clean",
+            ).update(
+                planned_write_set=mutable_paths[:1],
+            ),
             "drift_uses_unrelated_fixture": lambda value: observation(
                 value, "check_drift",
             ).update(
@@ -3297,6 +3302,72 @@ class QualityFrameworkTest(unittest.TestCase):
                 rejected = validate(rejected_candidate)
                 self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
                 self.assertEqual("CANDIDATE_REJECTED", json.loads(rejected.stdout)["status"])
+
+        write_set_permissions = {
+            "planned_write_set": {"plan", "apply", "stale_plan"},
+            "attempted_write_set": {"apply", "injected_failure"},
+            "committed_write_set": {"apply"},
+            "residual_paths": set(),
+        }
+        for field, allowed_kinds in write_set_permissions.items():
+            for kind in set(kinds) - allowed_kinds:
+                with self.subTest(matrix="write_set_forbidden", kind=kind, field=field):
+                    rejected_candidate = copy.deepcopy(candidate)
+                    observation(rejected_candidate, kind)[field] = mutable_paths[:1]
+                    rejected = validate(rejected_candidate)
+                    self.assertEqual(
+                        1, rejected.returncode, rejected.stdout + rejected.stderr,
+                    )
+                    messages = "\n".join(
+                        sample["message"]
+                        for sample in json.loads(rejected.stdout)["diagnostics"]["samples"]
+                    )
+                    self.assertIn(f"{field} is not allowed for {kind}", messages)
+
+        required_write_sets = {
+            ("plan", "planned_write_set"),
+            ("apply", "planned_write_set"),
+            ("apply", "attempted_write_set"),
+            ("apply", "committed_write_set"),
+            ("stale_plan", "planned_write_set"),
+            ("injected_failure", "attempted_write_set"),
+        }
+        for kind, field in required_write_sets:
+            with self.subTest(matrix="write_set_required", kind=kind, field=field):
+                rejected_candidate = copy.deepcopy(candidate)
+                observation(rejected_candidate, kind)[field] = []
+                rejected = validate(rejected_candidate)
+                self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
+                messages = "\n".join(
+                    sample["message"]
+                    for sample in json.loads(rejected.stdout)["diagnostics"]["samples"]
+                )
+                self.assertIn(f"{field} must be non-empty for {kind}", messages)
+
+        plan_binding_kinds = {"plan", "apply", "stale_plan"}
+        for kind in set(kinds) - plan_binding_kinds:
+            with self.subTest(matrix="plan_binding_forbidden", kind=kind):
+                rejected_candidate = copy.deepcopy(candidate)
+                observation(rejected_candidate, kind)["plan_sha256"] = plan
+                rejected = validate(rejected_candidate)
+                self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
+                messages = "\n".join(
+                    sample["message"]
+                    for sample in json.loads(rejected.stdout)["diagnostics"]["samples"]
+                )
+                self.assertIn(f"plan_sha256 is not allowed for {kind}", messages)
+
+        for kind in plan_binding_kinds:
+            with self.subTest(matrix="plan_binding_required", kind=kind):
+                rejected_candidate = copy.deepcopy(candidate)
+                observation(rejected_candidate, kind)["plan_sha256"] = None
+                rejected = validate(rejected_candidate)
+                self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
+                messages = "\n".join(
+                    sample["message"]
+                    for sample in json.loads(rejected.stdout)["diagnostics"]["samples"]
+                )
+                self.assertIn("plan_sha256 must be a SHA-256 digest", messages)
 
         directory_input = fixture.parent / "candidate-directory"
         directory_input.mkdir()

@@ -68,8 +68,7 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
 4. **Ingest existing truth before adding controls**
    - Read existing instruction files, CI, build targets, test registries, fitness runners, release workflows, contracts, and operations docs.
    - Link and gap-fill; do not duplicate an existing authoritative fact.
-   - Initialization inventories every detected instruction source, including nested `SKILL.md` files, as mandatory `unmapped` federated records. Expand whole-file records into heading/rule selectors where ownership differs. Assign semantic owner, disposition, and control references, set digest-bound status, then sync traceability;
-     an unmapped mandatory source blocks claims but not control execution.
+   - Initialization inventories every detected instruction source, but discovery does not grant authority. Repository-root agent instructions are mandatory `unmapped` federation candidates; scoped rule files remain non-mandatory until applicability is reviewed; contributor guidance and nested tool/skill references remain inventory evidence only. Expand eligible whole-file records into heading/rule selectors where ownership differs. Assign semantic owner, disposition, and control references, set digest-bound status, then sync traceability. An unmapped mandatory source blocks claims but not control execution.
 
 5. **Build end-to-end traceability**
    - Every business requirement maps to risk, owner/ADR, control, test/fitness function, evidence, and delivery/runtime outcome.
@@ -142,9 +141,10 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      --require-level TASK_CLAIM_READY
    ```
 
-   Generate the machine-owned handoff header under the evidence plane, then
-   lint it immediately before transfer. Human notes cannot redefine campaign,
-   scope, controls, readiness, subject, Skill, or authorization fields.
+   Generate the compact handoff summary and canonical JSON payload under the
+   evidence plane, then lint them immediately before transfer. Human notes
+   cannot redefine campaign, scope, controls, readiness, subject, Skill, or
+   authorization fields. AI brownfield uses exact registered campaign context:
 
    ```bash
    python3 "$SKILL_DIR/scripts/render_task_handoff.py" --root . \
@@ -154,6 +154,34 @@ Use **Evidence over Claims**. Only a current `PASS` satisfies an applicable cont
      --campaign-id <id> --campaign-revision <n> \
      --phase-id <phase> --task-id <task> --check
    ```
+
+   Human greenfield/brownfield and AI greenfield tasks have no campaign task
+   authority, so pass an explicit task ID and every affected control. Never
+   infer controls from changed files or language markers:
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/render_task_handoff.py" --root . \
+     --task-id <task> --control <QF.ID> [--control <QF.ID> ...] --write
+   ```
+
+   Read structured state through bounded projections instead of loading the
+   complete registry, ledger, traceability graph, or handoff into the model:
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/query_quality_state.py" --root . \
+     --view control --id <QF.ID>
+   python3 "$SKILL_DIR/scripts/query_quality_state.py" --root . \
+     --view readiness --id TASK_CLAIM_READY
+   ```
+
+   Handoff-backed queries must re-derive current machine state before returning
+   it; a matching JSON/Markdown digest pair proves consistency, not truth.
+   Unknown or unsupported selectors fail explicitly and never return a
+   successful empty result. Human-note acknowledgement is only an operator
+   freshness assertion, not owner approval, audit authority, or claim evidence.
+   A control-filtered evidence result is a labeled projection with source-chain
+   bindings, not a ledger entry; only an exact run-ID query returns the original
+   complete run object.
 
    The renderer must invoke readiness with
    `--require-level TASK_CLAIM_READY`. A typed `BLOCKED` or `NOT_EVALUATED`
@@ -214,7 +242,8 @@ and never overrides them. Use the initializer in step 3 to scaffold the set.
 ├── evidence-ledger.json    # subject-bound evidence + separate storage-chain bindings
 ├── traceability-graph.json # derived requirement → risk → control → test → evidence graph
 ├── evidence/
-│   └── task-handoff.md     # generated task context/readiness header + human implementation notes
+│   ├── task-handoff.json   # canonical compact task context/readiness payload
+│   └── task-handoff.md     # bounded generated summary + bound human implementation notes
 ├── INDEX.md          # ALWAYS loaded: one-line profile, owner summary, hard-gate shortlist, links (keep <150 lines)
 ├── profile.md        # evidence: README excerpt + deps + build targets + existing rules
 ├── owners.md         # owner map (semantic owners vs adapters)

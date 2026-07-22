@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,7 @@ READINESS = ROOT / "scripts" / "assess_readiness.py"
 HARNESS_CANDIDATE = ROOT / "scripts" / "validate_harness_candidate.py"
 MUTATOR_CANDIDATE = ROOT / "scripts" / "validate_mutator_candidate.py"
 HANDOFF = ROOT / "scripts" / "render_task_handoff.py"
+QUERY_STATE = ROOT / "scripts" / "query_quality_state.py"
 SEAL = ROOT / "scripts" / "seal_evidence.py"
 PREFLIGHT = ROOT / "templates" / "preflight.py"
 
@@ -2129,7 +2131,58 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual({"gate", "coverage-gate"}, set(scan["build_targets"]))
         self.assertEqual("FF-01", scan["fitness_registry"][0]["id"])
         self.assertEqual(2, len(scan["package_scripts"]))
+        self.assertEqual({"."}, {item["cwd"] for item in scan["package_scripts"]})
         self.assertEqual("make gate", scan["ci_commands"][0]["value"])
+
+    def test_nested_package_script_keeps_its_working_directory(self) -> None:
+        project = Path(tempfile.mkdtemp(prefix="quality-scan-package-cwd-test-"))
+        package = project / "web" / "package.json"
+        package.parent.mkdir()
+        package.write_text(json.dumps({"scripts": {"test": "vitest run"}}))
+        output = project / "scan.json"
+        result = subprocess.run(
+            [sys.executable, str(SCAN), "--root", str(project), "--out", str(output)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        [script] = json.loads(output.read_text())["package_scripts"]
+        self.assertEqual("web", script["cwd"])
+        self.assertEqual(["npm", "run", "test"], script["invocation"])
+
+    def test_language_presence_never_fabricates_an_executable_gate(self) -> None:
+        project = self.make_project({
+            "tests/test_example.py": "def test_example():\n    assert True\n",
+            "src/main.go": "package main\n",
+            "web/package.json": json.dumps({"scripts": {"test": "vitest run"}}),
+        })
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        controls = {item["id"]: item for item in registry["controls"]}
+        self.assertNotIn("QF.PYTHON.TEST", controls)
+        self.assertNotIn("QF.GO.TEST", controls)
+        self.assertNotIn("QF.NODE.GATE", controls)
+        self.assertEqual("manual", controls["QF.GATE.PR"]["execution"]["type"])
+
+    def test_just_gate_preserves_repository_owned_runner_identity(self) -> None:
+        project = self.make_project({"Justfile": "gate:\n    true\n"})
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        gate = next(item for item in registry["controls"] if item["id"] == "QF.GATE.PR")
+        self.assertEqual(["just", "gate"], gate["execution"]["command"])
+
+    def test_multiple_root_gates_are_ambiguous_and_remain_manual(self) -> None:
+        project = self.make_project({
+            "Makefile": "gate:\n\t@true\n",
+            "Justfile": "gate:\n    true\n",
+        })
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        gate = next(item for item in registry["controls"] if item["id"] == "QF.GATE.PR")
+        self.assertEqual("manual", gate["execution"]["type"])
+        self.assertIn("No unambiguous root target", gate["applicability_rationale"])
 
     def test_scanner_excludes_generated_guardrails_from_project_samples(self) -> None:
         project = Path(tempfile.mkdtemp(prefix="quality-scan-self-test-"))
@@ -2193,7 +2246,8 @@ class QualityFrameworkTest(unittest.TestCase):
         control = next(item for item in registry["controls"] if item["id"] == "QF.CI.REMOTE")
         self.assertEqual(control["execution"]["type"], "remote")
         self.assertTrue(control["execution"]["authorization_required"])
-        self.assertIn("{commit}", control["execution"]["command"][2])
+        self.assertNotIn("command", control["execution"])
+        self.assertIn("project-owned required-check identity", control["evidence_required"])
 
     def test_scanner_discovers_nested_skills_without_truncating_rules(self) -> None:
         project = Path(tempfile.mkdtemp(prefix="quality-scan-rules-test-"))
@@ -2210,10 +2264,35 @@ class QualityFrameworkTest(unittest.TestCase):
             check=False, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        paths = {item["path"] for item in json.loads(output.read_text())["instruction_files"]}
+        records = json.loads(output.read_text())["instruction_files"]
+        paths = {item["path"] for item in records}
         self.assertEqual(46, len(paths))
         self.assertIn(".claude/skills/testing/SKILL.md", paths)
         self.assertIn("area-44/AGENTS.md", paths)
+        skill = next(item for item in records if item["path"].endswith("SKILL.md"))
+        nested = next(item for item in records if item["path"] == "area-44/AGENTS.md")
+        self.assertEqual("tool_reference", skill["source_kind"])
+        self.assertFalse(skill["federation_candidate"])
+        self.assertEqual("scoped_instruction", nested["source_kind"])
+        self.assertTrue(nested["federation_candidate"])
+        self.assertFalse(nested["mandatory_default"])
+
+    def test_federation_excludes_guidance_and_does_not_globalize_scoped_rules(self) -> None:
+        project = self.make_project({
+            "AGENTS.md": "# Repository instruction\n",
+            "CONTRIBUTING.md": "# Contributor workflow\n",
+            ".claude/rules/backend.md": "# Backend-only rule\n",
+            ".claude/skills/review/SKILL.md": "# Review tool\n",
+        })
+        registry = json.loads(
+            (project / ".guardrails" / "control-registry.yaml").read_text()
+        )
+        mappings = {
+            item["source_ref"]: item for item in registry["federated_rule_mappings"]
+        }
+        self.assertEqual({"AGENTS.md", ".claude/rules/backend.md"}, set(mappings))
+        self.assertTrue(mappings["AGENTS.md"]["mandatory"])
+        self.assertFalse(mappings[".claude/rules/backend.md"]["mandatory"])
 
     def test_manifest_framework_binding_drift_blocks_evaluation(self) -> None:
         project = self.make_project()
@@ -2482,11 +2561,15 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         self.assertEqual(0, rendered.returncode, rendered.stdout + rendered.stderr)
         handoff = project / ".guardrails" / "evidence" / "task-handoff.md"
+        payload_path = project / ".guardrails" / "evidence" / "task-handoff.json"
         first = handoff.read_bytes()
         text = first.decode()
-        payload = json.loads(text.split("```json\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(1, payload["campaign"]["revision"])
-        self.assertEqual("TASK-1", payload["campaign"]["task_id"])
+        payload = json.loads(payload_path.read_text())
+        self.assertLessEqual(len(text.splitlines()), 300)
+        self.assertNotIn("```json", text)
+        self.assertEqual("1.2", payload["handoff_schema_version"])
+        self.assertEqual(1, payload["task_context"]["campaign_revision"])
+        self.assertEqual("TASK-1", payload["task_context"]["task_id"])
         self.assertEqual([control_id], payload["affected_control_ids"])
         self.assertEqual(["src", "tests"], payload["assessed_scope"])
         self.assertIn("TASK_CLAIM_READY", payload["readiness"])
@@ -2499,7 +2582,10 @@ class QualityFrameworkTest(unittest.TestCase):
         self.assertEqual("NOT_EVALUATED", acquisition["applicability"])
         self.assertEqual("BLOCKED", acquisition["execution"])
         self.assertIsNone(acquisition["required_capability_ids"])
-        self.assertTrue(acquisition["blocker_details"])
+        self.assertTrue(acquisition["blocker_ids"])
+        self.assertTrue(set(acquisition["blocker_ids"]) <= set(payload["blocker_catalog"]))
+        for level in payload["readiness"].values():
+            self.assertTrue(set(level["blocker_ids"]) <= set(payload["blocker_catalog"]))
         self.assertNotIn("handoff_blocker_details", payload)
         self.assertTrue(payload["action_policy"]["machine_fields_are_authoritative"])
 
@@ -2545,6 +2631,334 @@ class QualityFrameworkTest(unittest.TestCase):
         )
         self.assertEqual(1, stale.returncode, stale.stdout + stale.stderr)
         self.assertEqual("STALE_HANDOFF", json.loads(stale.stdout)["status"])
+
+    def test_handoff_supports_explicit_controls_outside_ai_brownfield(self) -> None:
+        for mode in ("human_greenfield", "human_brownfield", "ai_greenfield"):
+            with self.subTest(mode=mode):
+                project = self.make_project(development_mode=mode)
+                registry = json.loads(
+                    (project / ".guardrails" / "control-registry.yaml").read_text()
+                )
+                control_id = registry["controls"][0]["id"]
+                result = subprocess.run(
+                    [
+                        sys.executable, str(HANDOFF), "--root", str(project),
+                        "--task-id", "TASK-PORTABLE", "--control", control_id, "--write",
+                    ],
+                    check=False, capture_output=True, text=True,
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                payload = json.loads(
+                    (project / ".guardrails/evidence/task-handoff.json").read_text()
+                )
+                self.assertEqual("explicit_control_selection", payload["task_context"]["kind"])
+                self.assertEqual(mode, payload["task_context"]["development_mode"])
+                self.assertEqual([control_id], payload["affected_control_ids"])
+
+    def test_handoff_rejects_implicit_task_selection(self) -> None:
+        project = self.make_project(development_mode="human_brownfield")
+        result = subprocess.run(
+            [sys.executable, str(HANDOFF), "--root", str(project), "--task-id", "TASK-1", "--write"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("requires at least one --control", result.stdout)
+
+    def test_handoff_pair_write_rolls_back_after_partial_failure(self) -> None:
+        module = self.load_script_module("render_task_handoff_transaction_fixture", HANDOFF)
+        directory = Path(tempfile.mkdtemp(prefix="handoff-transaction-test-"))
+        first = directory / "task-handoff.json"
+        second = directory / "task-handoff.md"
+        first.write_text("old-json\n")
+        second.write_text("old-markdown\n")
+        real_write = module.atomic_write
+        failed = False
+
+        def fail_second_once(path: Path, content: str) -> None:
+            nonlocal failed
+            if path == second and not failed:
+                failed = True
+                raise OSError("fixture write failure")
+            real_write(path, content)
+
+        with mock.patch.object(module, "atomic_write", side_effect=fail_second_once):
+            with self.assertRaisesRegex(OSError, "fixture write failure"):
+                module.atomic_write_pair((first, "new-json\n"), (second, "new-markdown\n"))
+        self.assertEqual("old-json\n", first.read_text())
+        self.assertEqual("old-markdown\n", second.read_text())
+
+    def test_human_notes_are_warned_stale_and_require_explicit_acknowledgement(self) -> None:
+        project = self.make_project(development_mode="human_brownfield")
+        registry = json.loads(
+            (project / ".guardrails/control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        command = [
+            sys.executable, str(HANDOFF), "--root", str(project),
+            "--task-id", "TASK-NOTES", "--control", control_id,
+        ]
+        rendered = subprocess.run(
+            [*command, "--write"], check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stdout + rendered.stderr)
+        handoff = project / ".guardrails/evidence/task-handoff.md"
+        handoff.write_text(handoff.read_text() + "Implementation detail reviewed for the old subject.\n")
+        (project / "README.md").write_text("# Changed subject\n")
+        subprocess.run(["git", "add", "README.md"], cwd=project, check=True)
+        subprocess.run(["git", "commit", "-qm", "change subject"], cwd=project, check=True)
+        stale = subprocess.run(
+            [*command, "--write"], check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, stale.returncode, stale.stdout + stale.stderr)
+        stale_report = json.loads(stale.stdout)
+        self.assertEqual("STALE_HUMAN_NOTES", stale_report["warnings"][0]["code"])
+        payload = json.loads(
+            (project / ".guardrails/evidence/task-handoff.json").read_text()
+        )
+        self.assertEqual("STALE", payload["human_notes"]["status"])
+        acknowledged = subprocess.run(
+            [*command, "--write", "--acknowledge-human-notes"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, acknowledged.returncode, acknowledged.stdout + acknowledged.stderr)
+        self.assertEqual([], json.loads(acknowledged.stdout)["warnings"])
+
+    def test_quality_state_query_returns_bounded_selected_data(self) -> None:
+        project = self.make_project(development_mode="human_brownfield")
+        registry = json.loads(
+            (project / ".guardrails/control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        rendered = subprocess.run(
+            [
+                sys.executable, str(HANDOFF), "--root", str(project),
+                "--task-id", "TASK-QUERY", "--control", control_id, "--write",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stdout + rendered.stderr)
+        query = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "control", "--id", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, query.returncode, query.stdout + query.stderr)
+        result = json.loads(query.stdout)
+        self.assertEqual([control_id], [item["id"] for item in result["result"]["controls"]])
+
+        for view in ("control", "trace", "evidence", "readiness", "blocker"):
+            with self.subTest(unknown_selector_view=view):
+                unknown = subprocess.run(
+                    [
+                        sys.executable, str(QUERY_STATE), "--root", str(project),
+                        "--view", view, "--id", "UNKNOWN-SELECTOR",
+                    ],
+                    check=False, capture_output=True, text=True,
+                )
+                self.assertEqual(1, unknown.returncode, unknown.stdout + unknown.stderr)
+                self.assertEqual(
+                    "QUERY_SELECTOR_NOT_FOUND", json.loads(unknown.stdout)["status"],
+                )
+
+        unsupported = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "binding", "--id", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, unsupported.returncode, unsupported.stdout + unsupported.stderr)
+        self.assertEqual(
+            "QUERY_SELECTOR_UNSUPPORTED", json.loads(unsupported.stdout)["status"],
+        )
+        selector_overflow = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "control", "--limit", "1",
+                "--id", control_id, "--id", registry["controls"][1]["id"],
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(
+            1, selector_overflow.returncode,
+            selector_overflow.stdout + selector_overflow.stderr,
+        )
+        self.assertEqual(
+            "QUERY_RESULT_TOO_LARGE", json.loads(selector_overflow.stdout)["status"],
+        )
+        trace = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "trace", "--id", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, trace.returncode, trace.stdout + trace.stderr)
+        links = json.loads(trace.stdout)["result"]["trace"]
+        self.assertEqual([control_id], [item["control_id"] for item in links])
+        too_large = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "control", "--max-bytes", "256",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(1, too_large.returncode)
+        self.assertEqual("QUERY_RESULT_TOO_LARGE", json.loads(too_large.stdout)["status"])
+
+        second_control_id = registry["controls"][1]["id"]
+        run = self.run_evaluator(
+            project, "--run", "--control", control_id, "--control", second_control_id,
+        )
+        self.assertEqual(0, run.returncode, run.stdout + run.stderr)
+        evidence = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "evidence", "--id", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, evidence.returncode, evidence.stdout + evidence.stderr)
+        evidence_runs = json.loads(evidence.stdout)["result"]["runs"]
+        self.assertTrue(evidence_runs)
+        self.assertEqual(
+            {control_id},
+            {
+                item["control_id"]
+                for evidence_run in evidence_runs
+                for item in evidence_run["results"]
+            },
+        )
+        self.assertTrue(all("entry_sha256" not in item for item in evidence_runs))
+        self.assertTrue(all(
+            item["projection"]["kind"] == "ledger_run_results"
+            for item in evidence_runs
+        ))
+
+        payload_path = project / ".guardrails/evidence/task-handoff.json"
+        summary_path = project / ".guardrails/evidence/task-handoff.md"
+        payload = json.loads(payload_path.read_text())
+        original_digest = hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            ).encode()
+        ).hexdigest()
+        payload["readiness"]["TASK_CLAIM_READY"]["status"] = "READY"
+        payload["readiness"]["TASK_CLAIM_READY"]["blocker_ids"] = []
+        canonical_payload = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        )
+        payload_path.write_text(canonical_payload + "\n")
+        forged_digest = hashlib.sha256(canonical_payload.encode()).hexdigest()
+        summary_path.write_text(
+            summary_path.read_text().replace(original_digest, forged_digest, 1)
+        )
+        tampered = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "readiness",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, tampered.returncode)
+        self.assertIn("stale or inconsistent", tampered.stdout)
+        independent = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "control", "--id", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, independent.returncode, independent.stdout + independent.stderr)
+
+    def test_handoff_query_rederives_human_note_binding_from_markdown(self) -> None:
+        project = self.make_project(development_mode="human_brownfield")
+        registry = json.loads(
+            (project / ".guardrails/control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        rendered = subprocess.run(
+            [
+                sys.executable, str(HANDOFF), "--root", str(project),
+                "--task-id", "TASK-NOTES-QUERY", "--control", control_id, "--write",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stdout + rendered.stderr)
+        summary = project / ".guardrails/evidence/task-handoff.md"
+        text = summary.read_text()
+        marker = re.search(
+            r"(?m)^<!-- PROJECT-GUARDRAILS:HUMAN-NOTES-BINDING (\{.*\}) -->$",
+            text,
+        )
+        self.assertIsNotNone(marker)
+        binding = json.loads(marker.group(1))
+        binding["subject_sha256"] = "0" * 64
+        forged_marker = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+        summary.write_text(
+            text.replace(marker.group(1), forged_marker, 1)
+            + "Implementation details bound to the forged marker.\n"
+        )
+        queried = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "human-notes",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, queried.returncode)
+        self.assertIn("human_notes", queried.stdout)
+
+    def test_handoff_paths_follow_custom_guardrails_directory(self) -> None:
+        project = self.make_project(development_mode="human_brownfield")
+        (project / ".guardrails").rename(project / ".quality")
+        registry = json.loads((project / ".quality/control-registry.yaml").read_text())
+        control_id = registry["controls"][0]["id"]
+        rendered = subprocess.run(
+            [
+                sys.executable, str(HANDOFF), "--root", str(project),
+                "--guardrails-dir", ".quality", "--task-id", "TASK-CUSTOM-PATH",
+                "--control", control_id, "--write",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stdout + rendered.stderr)
+        self.assertTrue((project / ".quality/evidence/task-handoff.json").is_file())
+        self.assertTrue((project / ".quality/evidence/task-handoff.md").is_file())
+        queried = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--guardrails-dir", ".quality", "--view", "readiness",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, queried.returncode, queried.stdout + queried.stderr)
+
+    def test_handoff_tools_reject_guardrails_symlink_escape(self) -> None:
+        project = self.make_project(development_mode="human_brownfield")
+        external = project.parent / f"{project.name}-external-guardrails"
+        (project / ".guardrails").rename(external)
+        (project / ".guardrails").symlink_to(external, target_is_directory=True)
+        registry = json.loads((external / "control-registry.yaml").read_text())
+        control_id = registry["controls"][0]["id"]
+        rendered = subprocess.run(
+            [
+                sys.executable, str(HANDOFF), "--root", str(project),
+                "--task-id", "TASK-SYMLINK", "--control", control_id, "--write",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, rendered.returncode)
+        queried = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--view", "control", "--id", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, queried.returncode)
 
     def test_evidence_uses_project_relative_paths(self) -> None:
         project = self.make_project()

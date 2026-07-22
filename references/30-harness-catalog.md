@@ -84,7 +84,7 @@ Release-grade supply-chain tooling (2026): produce **Sigstore-signed build prove
 
 ## Declarative Rule Engine (Three-Layer Fitness Architecture)
 
-When a project accumulates many per-milestone or per-concern check scripts, consolidate them into a **declarative rule engine** rather than writing N scripts. Pattern observed in AgentShield:
+When a project accumulates many per-milestone or per-concern check scripts, consolidate them into a **declarative rule engine** rather than writing N scripts:
 
 | Layer | Tool | Scope | Gate? |
 |-------|------|-------|-------|

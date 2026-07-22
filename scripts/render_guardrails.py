@@ -94,7 +94,7 @@ def candidate_rules(scan: dict) -> list[dict]:
         candidates.append({
             "title": "Ingest existing project instructions before adding guardrails",
             "family": "Evidence integrity / rule lifecycle",
-            "rule": "Before changing project guardrails, read the detected instruction files, link to authoritative rules, and only add gap-filling rules that have a source, owner, and verification path.",
+            "rule": "Before changing project guardrails, classify detected instruction files by authority and scope, link to confirmed authoritative rules, and only add gap-filling rules that have a source, owner, and verification path.",
             "evidence": instr_paths,
             "confidence": "high",
             "reject_if": "the candidate duplicates text already owned by an instruction file instead of linking to it",
@@ -345,9 +345,12 @@ def sec_profile(scan: dict) -> str:
                 f"| `{entry['id']}` | {entry['dimension']} | `{entry['gate']}` | `{entry['script']}` |"
             )
     if package_scripts:
-        lines += ["", "## Package scripts", "", "| Package | Script | Invocation |", "|---|---|---|"]
+        lines += ["", "## Package scripts", "", "| Package | Working directory | Script | Invocation |", "|---|---|---|---|"]
         for item in package_scripts[:30]:
-            lines.append(f"| `{item['package']}` | `{item['name']}` | `{' '.join(item['invocation'])}` |")
+            lines.append(
+                f"| `{item['package']}` | `{item.get('cwd', item['package'])}` | "
+                f"`{item['name']}` | `{' '.join(item['invocation'])}` |"
+            )
     if ci_commands:
         lines += [
             "", "## CI command evidence", "",
@@ -379,9 +382,9 @@ def sec_profile(scan: dict) -> str:
     if instr:
         lines += [
             "",
-            "## Existing project rules — DOMAIN AUTHORITY (federate, do not overwrite)",
+            "## Existing project instruction candidates",
             "",
-            "The project already keeps rule/instruction files. Treat them as the authority for project-specific domain semantics, owners, thresholds, and gates. The portable Skill owns claim, status, evidence, audit, authorization, and campaign meta-semantics. Link and gap-fill instead of copying rules; a conflict blocks the affected claim until it is reviewed.",
+            "The project already keeps rule/instruction candidates. Confirm each source's authority and scope before federation; contributor guidance and tool references are not automatically task rules. Confirmed project rules own project-specific domain semantics, owners, thresholds, and gates. The portable Skill owns claim, status, evidence, audit, authorization, and campaign meta-semantics. Link and gap-fill instead of copying rules; a conflict blocks the affected claim until it is reviewed.",
             "",
             "| File | Lines |",
             "|---|---|",
@@ -858,8 +861,8 @@ def build_index(scan: dict) -> str:
     lines = [f"# Project Guardrails — {basename}", ""]
     if instr:
         lines += [
-            f"> ⚠ **{len(instr)} existing rule/instruction files detected** (AGENTS.md / `.claude`|`cursor`|`codex` rules / CONTRIBUTING …).",
-            "> They own **project domain semantics**; the portable Skill owns claim/evidence meta-semantics. This `.guardrails/` set links and fills gaps instead of duplicating either owner. Conflicts block the affected claim. See *Existing project rules* in [profile.md](profile.md).",
+            f"> **{len(instr)} rule/instruction candidates detected** (agent instructions, scoped rules, contributor guidance, and tool references).",
+            "> Discovery does not grant authority: confirm source scope before federation. Confirmed project rules own project domain semantics; the portable Skill owns claim/evidence meta-semantics. Conflicts block the affected claim. See *Existing project rules* in [profile.md](profile.md).",
             "",
         ]
     lines += [

@@ -11,7 +11,7 @@ evidence, and refuse completion or release claims that are not proven.
 
 Use it when asked to:
 
-- initialize or regenerate a v2 project-wide quality framework,
+- initialize or regenerate a v3 project-wide quality framework,
 - create and execute engineering, product, operations, and release controls,
 - trace requirements through risks, tests, controls, evidence, and outcomes,
 - perform self-audit, independent cross-audit, and release authorization,
@@ -39,10 +39,12 @@ Use it when asked to:
 └── scripts/
     ├── scan_project.py      # collect repo evidence → JSON
     ├── render_guardrails.py # render human guidance
-    ├── init_quality_framework.py # create a v2 .guardrails control plane
-    ├── register_campaign.py # bind an AI brownfield campaign to current v2 evidence
+    ├── init_quality_framework.py # create a v3 .guardrails control plane
+    ├── register_campaign.py # bind an AI brownfield campaign to current v3 evidence
     ├── sync_traceability.py # regenerate the derived traceability graph
-    └── evaluate_quality.py  # execute controls and enforce claims
+    ├── evaluate_quality.py  # execute controls and enforce claims
+    ├── render_task_handoff.py # derive the current task handoff
+    └── query_quality_state.py # return bounded, verified state projections
 ```
 
 ## Install
@@ -94,6 +96,11 @@ python3 scripts/init_quality_framework.py --root /path/to/project \
   --build-topology single_form \
   --persistent-state database \
   --external-contributions accepted \
+  --skill-deployment environment_managed \
+  --evidence-profile open_source \
+  --evidence-retention project_lifetime \
+  --evidence-max-active-bytes 1073741824 \
+  --evidence-sealing-profile sha256_chain \
   --no-ai-system \
   --scope-mode full_repo \
   --legal-profile none_identified \
@@ -101,9 +108,11 @@ python3 scripts/init_quality_framework.py --root /path/to/project \
 ```
 
 `--scaffold-engineering` is explicit and optional. It creates a local,
-stdlib-only gate runner from detected project-owned commands and a pinned,
-least-privilege GitHub Actions entry point without installing dependencies or
-overwriting an existing workflow of the same name.
+stdlib-only runner only when the scanner finds an unambiguous repository-root
+target named `gate`, plus a pinned, least-privilege GitHub Actions entry point.
+Language markers, package script names, and candidate gate names never become
+executable commands without owner selection. Scaffolding installs no
+dependencies and does not overwrite an existing workflow of the same name.
 
 Run local controls with stable authority/context identities, bind each independent
 stage to the evidence it reviewed, then evaluate a claim:
@@ -124,7 +133,7 @@ AI brownfield work first registers a reviewed campaign JSON specification with
 `register_campaign.py`. Task and phase claims then identify the exact campaign
 revision and phase/task. Ratchet observations may support scoped completion while
 the underlying debt control remains `FAIL`; project and release claims remain
-absolute. This repository intentionally implements v2 only and carries no v1
+absolute. This repository intentionally implements v3 only and carries no v1/v2
 reader or compatibility branch.
 
 ## License

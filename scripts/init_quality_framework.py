@@ -181,7 +181,7 @@ def federated_rule_inventory(root: Path, scan: dict) -> list[dict]:
     records = [
         {**item, "source_ref": item.get("path")}
         for item in scan.get("instruction_files", [])
-        if isinstance(item, dict)
+        if isinstance(item, dict) and item.get("federation_candidate") is True
     ]
     for item in deduplicate_source_records(records):
         relative = item["source_ref"]
@@ -198,7 +198,7 @@ def federated_rule_inventory(root: Path, scan: dict) -> list[dict]:
             "disposition": "federated",
             "semantic_owner": "unassigned",
             "control_refs": [],
-            "mandatory": True,
+            "mandatory": item.get("mandatory_default") is True,
             "status": "unmapped",
             "observed_at": observed_at,
             "reviewed_at": None,
@@ -219,42 +219,15 @@ def deterministic_observed_at(root: Path) -> str:
 
 
 def recommended_gate_commands(scan: dict) -> list[list[str]]:
-    targets = set(scan.get("build_targets", []))
-    if "gate" in targets:
-        return [["make", "gate"]]
-    languages = set(scan.get("languages", {}))
-    commands: list[list[str]] = []
-    if "rust" in languages:
-        commands.extend([
-            ["cargo", "fmt", "--all", "--", "--check"],
-            ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"],
-            ["cargo", "test", "--workspace"],
-        ])
-    if "go" in languages:
-        commands.extend([["go", "vet", "./..."], ["go", "test", "./..."]])
-    if "python" in languages and scan.get("test_files_sample"):
-        commands.append(["python3", "-m", "pytest"])
-    package_scripts = {item.get("name") for item in scan.get("package_scripts", [])}
-    for name in ("lint", "typecheck", "test", "build"):
-        if name in package_scripts:
-            commands.append(["npm", "run", name])
-    evidence = scan.get("evidence", {})
-    if "java" in languages:
-        if evidence.get("gradle_wrapper"):
-            commands.append(["./gradlew", "check"])
-        elif evidence.get("maven_wrapper"):
-            commands.append(["./mvnw", "verify"])
-    if "c_cpp" in languages and evidence.get("cmake"):
-        commands.extend([
-            ["cmake", "-S", ".", "-B", "build"],
-            ["cmake", "--build", "build"],
-            ["ctest", "--test-dir", "build", "--output-on-failure"],
-        ])
-    unique: list[list[str]] = []
-    for command in commands:
-        if command not in unique:
-            unique.append(command)
-    return unique
+    commands = [
+        item.get("command")
+        for item in scan.get("build_target_details", [])
+        if isinstance(item, dict)
+        and item.get("name") == "gate"
+        and item.get("source") in {"Makefile", "makefile", "GNUmakefile", "justfile", "Justfile"}
+    ]
+    commands = [command for command in commands if isinstance(command, list) and command]
+    return commands if len(commands) == 1 else []
 
 
 def write_gate_runner(out_dir: Path, commands: list[list[str]]) -> str | None:
@@ -365,9 +338,7 @@ def manual_control(control_id: str, title: str, dimension: str, requirement: str
 
 
 def starter_controls(scan: dict, args: argparse.Namespace) -> list[dict]:
-    targets = set(scan.get("build_targets", []))
-    evidence = scan.get("evidence", {})
-    languages = set(scan.get("languages", {}))
+    gate_commands = recommended_gate_commands(scan)
     controls = [
         control(
             "QF.FRAMEWORK.MANIFEST", "Quality profile decisions are complete",
@@ -515,83 +486,32 @@ def starter_controls(scan: dict, args: argparse.Namespace) -> list[dict]:
             "engineering_ready",
             {
                 "type": "remote",
-                "command": [
-                    "gh", "api", "repos/{owner}/{repo}/commits/{commit}/check-runs",
-                    "--jq",
-                    "if (.total_count > 0 and ([.check_runs[] | select(.status != \"completed\" or .conclusion != \"success\")] | length == 0)) then empty else error(\"required check runs are incomplete or unsuccessful\") end",
-                ],
-                "cwd": ".",
-                "timeout_seconds": 120,
                 "authorization_required": True,
             },
-            ["remote check-run results", "assessed repository commit", "GitHub API response digest"],
+            [
+                "project-owned required-check identity",
+                "remote check results bound to the assessed repository and commit",
+                "remote provider response digest",
+            ],
             owner="quality",
         ))
-    if getattr(args, "scaffold_runner", None) and "gate" not in targets:
+    if gate_commands:
         controls.append(command_control(
-            "QF.GATE.SCAFFOLD", "Generated cross-ecosystem quality gate",
-            "generic_quality", "The explicitly scaffolded project quality entry point passes.",
-            "The recommended engineering skeleton can drift or fail silently.",
-            "engineering_ready", ["python3", args.scaffold_runner],
+            "QF.GATE.PR", "Repository quality gate", "quality_gate",
+            "The repository-owned root `gate` entry point passes for the assessed revision.",
+            "A declared repository gate can drift or fail without commit-bound evidence.",
+            "engineering_ready", gate_commands[0],
         ))
-
-    target_map = [
-        ("gate", "QF.GATE.PR", "PR quality gate", "engineering_ready", "quality_gate"),
-        ("gate-fitness", "QF.GATE.FITNESS", "Architecture fitness gate", "engineering_ready", "architecture"),
-        ("coverage-gate", "QF.GATE.COVERAGE", "Coverage gate", "engineering_ready", "test"),
-        ("gate-full", "QF.GATE.CLOSEOUT", "Closeout quality gate", "production_ready", "quality_gate"),
-        ("dast-gate", "QF.GATE.DAST", "Dynamic security gate", "production_ready", "security"),
-        ("test-real-stack-full", "QF.GATE.PRODUCT", "Real-stack product acceptance", "production_ready", "product_acceptance"),
-        ("supply-chain-gate", "QF.GATE.SUPPLY", "Supply-chain gate", "commercial_ready", "supply_chain"),
-        ("verify-release", "QF.GATE.RELEASE", "Release artifact verification", "commercial_ready", "release"),
-        ("verify-reproducible", "QF.GATE.REPRODUCIBLE", "Reproducible build verification", "commercial_ready", "release"),
-    ]
-    for target, control_id, title, maturity, dimension in target_map:
-        if target in targets:
-            controls.append(command_control(
-                control_id, title, dimension,
-                f"The repository-owned `{target}` command passes for the assessed revision.",
-                f"The project declares a {title.lower()} but does not prove it.", maturity,
-                ["make", target],
-            ))
-
-    if "gate" not in targets:
-        if "rust" in languages:
-            controls.extend([
-                command_control("QF.RUST.FMT", "Rust formatting", "generic_quality",
-                                "Rust formatting passes.", "Formatting drift reduces review quality.",
-                                "engineering_ready", ["cargo", "fmt", "--all", "--", "--check"]),
-                command_control("QF.RUST.TEST", "Rust tests", "test",
-                                "Rust tests pass.", "Behavior can regress without an executable test gate.",
-                                "engineering_ready", ["cargo", "test", "--workspace"]),
-            ])
-        if "go" in languages:
-            controls.append(command_control("QF.GO.TEST", "Go tests", "test", "Go tests pass.",
-                                            "Behavior can regress without an executable test gate.",
-                                            "engineering_ready", ["go", "test", "./..."]))
-        if "python" in languages and scan.get("test_files_sample"):
-            controls.append(command_control("QF.PYTHON.TEST", "Python tests", "test", "Python tests pass.",
-                                            "Behavior can regress without an executable test gate.",
-                                            "engineering_ready", ["python3", "-m", "pytest"]))
-        if ("typescript" in languages or "javascript" in languages) and evidence.get("node"):
-            controls.append(manual_control(
-                "QF.NODE.GATE", "Node/TypeScript project gate is selected", "test",
-                "The project selects and records its repository-owned npm/pnpm/yarn quality command.",
-                "Automatically guessing a package script can execute the wrong workflow.", "engineering_ready",
-            ))
-        if "java" in languages:
-            controls.append(manual_control(
-                "QF.JAVA.GATE", "Java project gate is selected", "test",
-                "The project selects its Maven or Gradle wrapper quality command.",
-                "Build-tool assumptions can make a generated gate false or unsafe.", "engineering_ready",
-            ))
-        if "c_cpp" in languages:
-            controls.append(manual_control(
-                "QF.CPP.GATE", "C/C++ project gate is selected", "test",
-                "The project selects its actual configure/build/test command and sanitizer profile.",
-                "C/C++ build layouts and safety requirements cannot be inferred from extensions alone.",
-                "engineering_ready",
-            ))
+    else:
+        controls.append(manual_control(
+            "QF.GATE.PR", "Repository quality gate is explicitly selected", "quality_gate",
+            "An owner selects the project-owned quality entry point, working directory, and required environment before it becomes executable evidence.",
+            "Language or file-name heuristics can execute an incomplete or incorrect workflow.",
+            "engineering_ready",
+            applicability_rationale=(
+                "No unambiguous root target named `gate` was found; detected targets and package scripts remain unverified candidates."
+            ),
+        ))
 
     if args.distribution_model in ("open_source", "open_core"):
         for path, control_id, title, maturity in (
@@ -810,7 +730,6 @@ def main() -> int:
             return result.returncode
     scan = json.loads(scan_path.read_text(encoding="utf-8"))
 
-    args.scaffold_runner = None
     gate_commands: list[list[str]] = []
     if args.scaffold_engineering:
         try:
@@ -819,9 +738,7 @@ def main() -> int:
             print("engineering scaffolding requires --out-dir inside the project root", file=sys.stderr)
             return 2
         gate_commands = recommended_gate_commands(scan)
-        if gate_commands:
-            args.scaffold_runner = (out_dir / "run-quality-gates.py").relative_to(root).as_posix()
-        else:
+        if not gate_commands:
             print("no evidence-backed commands found; engineering scaffold remains TODO")
 
     required_audits = ["self", "cross", "release_authority"]

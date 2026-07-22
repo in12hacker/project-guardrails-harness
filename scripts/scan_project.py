@@ -222,6 +222,39 @@ INSTRUCTION_FILE_DIRS = (
     ".claude/skills", ".agents/skills", ".github/instructions",
 )
 
+ROOT_INSTRUCTION_NAMES = frozenset({
+    "AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "CLAUDE.local.md",
+    "GEMINI.md", "GEMINI.local.md", "COPILOT.md", "CODEX.md",
+    ".cursorrules", "copilot-instructions.md",
+})
+
+
+def instruction_source_class(relative: str) -> tuple[str, bool, bool]:
+    """Classify discovery separately from federation authority.
+
+    The scanner can identify likely instruction locations, but path presence
+    alone cannot establish that a document governs every task.  The returned
+    tuple is ``(source_kind, federation_candidate, mandatory_default)``.
+    """
+    path = Path(relative)
+    parts = path.parts
+    if len(parts) == 1 and path.name in ROOT_INSTRUCTION_NAMES:
+        return "repository_instruction", True, True
+    if relative == ".github/copilot-instructions.md":
+        return "repository_instruction", True, True
+    if path.name == "CONTRIBUTING.md" or relative == "llms.txt":
+        return "contributor_guidance", False, False
+    if "skills" in parts or path.name == "SKILL.md":
+        return "tool_reference", False, False
+    if relative.startswith((
+        ".cursor/rules/", ".claude/rules/", ".codex/rules/",
+        ".github/instructions/", ".agents/",
+    )):
+        return "scoped_instruction", True, False
+    if path.name in ROOT_INSTRUCTION_NAMES:
+        return "scoped_instruction", True, False
+    return "reference", False, False
+
 
 def _line_count(path: Path) -> int:
     try:
@@ -248,8 +281,7 @@ def git_visible_files(root: Path) -> set[str] | None:
 
 
 def collect_instruction_files(root: Path) -> list[dict]:
-    """Rule/instruction docs the project ALREADY keeps. Presence + size only;
-    content is the model's to read as authoritative (ingest, don't overwrite)."""
+    """Discover instruction candidates without inferring universal authority."""
     found: list[dict] = []
     seen: set[str] = set()
     visible = git_visible_files(root)
@@ -261,7 +293,14 @@ def collect_instruction_files(root: Path) -> list[dict]:
             continue
         if relative in seen:
             continue
-        found.append({"path": relative, "lines": _line_count(path)})
+        source_kind, federation_candidate, mandatory_default = instruction_source_class(relative)
+        found.append({
+            "path": relative,
+            "lines": _line_count(path),
+            "source_kind": source_kind,
+            "federation_candidate": federation_candidate,
+            "mandatory_default": mandatory_default,
+        })
         seen.add(relative)
     for d in INSTRUCTION_FILE_DIRS:
         rdir = root / d
@@ -276,7 +315,16 @@ def collect_instruction_files(root: Path) -> list[dict]:
                     if visible is not None and relp not in visible:
                         continue
                     if relp not in seen:
-                        found.append({"path": relp, "lines": _line_count(p)})
+                        source_kind, federation_candidate, mandatory_default = (
+                            instruction_source_class(relp)
+                        )
+                        found.append({
+                            "path": relp,
+                            "lines": _line_count(p),
+                            "source_kind": source_kind,
+                            "federation_candidate": federation_candidate,
+                            "mandatory_default": mandatory_default,
+                        })
                         seen.add(relp)
     return sorted(found, key=lambda x: x["path"])
 
@@ -313,8 +361,7 @@ def _toml_dict_deps(path: Path, sections) -> list[str]:
 
 
 def manifest_deps(root: Path) -> dict[str, list[str]]:
-    """Top-level dependency names. Domain-neutral: the model reads
-    'aya-ebpf, rcgen, aes-gcm' and infers eBPF + crypto itself."""
+    """Return top-level dependency names as unclassified domain evidence."""
     deps: dict[str, list[str]] = {}
     cargo = root / "Cargo.toml"
     if cargo.is_file():
@@ -439,6 +486,7 @@ def collect_package_scripts(root: Path) -> list[dict]:
         for name, command in sorted(block.items()):
             scripts.append({
                 "package": package_dir or ".",
+                "cwd": package_dir or ".",
                 "name": name,
                 "command": str(command),
                 "invocation": ["npm", "run", name],
@@ -734,7 +782,7 @@ def main() -> int:
         "fitness_registry": fitness_registry,
         "guardrail_questions": [
             "What is the project's real profile? Read readme_excerpt + manifest_deps + the project's own AGENTS.md and state it -- do not trust a scanner label.",
-            "Which existing instruction files (AGENTS.md / .claude|cursor|codex/rules / CONTRIBUTING) already state rules? Read them as authoritative and gap-fill, never duplicate.",
+            "Which discovered instruction files are globally authoritative, scope-limited, contributor guidance, or tool references? Confirm applicability before federation and gap-fill without duplication.",
             "Which code paths are semantic owners, and which are only adapters?",
             "Which tests are PR gates vs product acceptance gates?",
             "Which tests have explicit test basis, risk, size, runner, and scenario origin?",

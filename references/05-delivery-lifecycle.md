@@ -166,14 +166,34 @@ typed blocker; the evaluator never selects an active task implicitly.
 
 ## Machine Task Handoff
 
-`render_task_handoff.py` derives a deterministic header from the active
-manifest, exact campaign task, registry, subject/Skill binding, readiness, and
-authorization policy. It writes under `.guardrails/evidence/` so persisting the
-derived handoff does not change the audited subject. The human section may add
-implementation details, but it cannot redefine reserved machine fields.
+`render_task_handoff.py` derives a deterministic compact Markdown summary and a
+canonical `task-handoff.json` payload from the manifest, explicit task context,
+registry, subject/Skill binding, readiness, and authorization policy. It writes
+under `.guardrails/evidence/` so persisting the derived handoff does not change
+the audited subject. Blocker details occur once in a normalized catalog and
+readiness levels reference blocker IDs. The human section may add implementation
+details, but it cannot redefine reserved machine fields.
 
-The handoff requires the same complete task context as readiness. `--check`
-rejects a missing header, changed subject, campaign revision, phase/task,
+AI brownfield handoff requires the same complete campaign context as readiness.
+Other development modes require an explicit task ID and affected control list.
+`--check` rejects a missing payload/summary, changed subject, task context,
 affected controls, scope, readiness, capability/authorization requirement, or
-manual reserved-field override. It does not claim task, merge, or release
-readiness; it only reports the current derived state.
+manual reserved-field override. Human notes carry their own subject/task
+binding; drift emits `STALE_HUMAN_NOTES` until an operator explicitly reviews
+and rebinds the notes. This local acknowledgement records freshness only; it is
+not owner approval, audit authority, or claim evidence. The handoff does not
+claim task, merge, or release readiness; it only reports the current derived
+state. Each file is replaced atomically and recoverable write failures roll the
+pair back; readers reject a mismatched pair after an uncatchable interruption.
+
+Use `query_quality_state.py` for bounded, selector-based reads. It parses the
+complete structured files locally, re-derives current handoff machine state,
+and returns only the requested view and IDs. Unknown or unsupported selectors
+fail explicitly rather than returning a misleading successful empty result.
+Results have item and byte limits; an oversized result fails with
+`QUERY_RESULT_TOO_LARGE` rather than emitting truncated or invalid JSON. A view
+without selectors may return its bounded prefix; an explicit selector request
+is all-or-error and is never silently truncated. Evidence selected by control
+ID is explicitly labeled as a projection: it preserves the source entry and
+previous-entry digests as provenance fields but is not itself a hash-chain
+entry. Selecting an exact run ID returns the complete original run.

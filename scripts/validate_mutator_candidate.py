@@ -43,7 +43,6 @@ SUCCESS_KINDS = {"help", "check_clean", "plan", "apply", "repeat_apply"}
 BASELINE_KINDS = {
     "help",
     "invalid_invocation",
-    "check_clean",
     "plan",
     "apply",
     "injected_failure",
@@ -69,6 +68,17 @@ def non_empty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def canonical_relative_path(value: object) -> bool:
+    """Accept one exact, portable, slash-normalized project-relative path."""
+    return (
+        safe_relative_path(value)
+        and "\\" not in value
+        and not any(character in value for character in "*?[]")
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+        and PurePosixPath(value).as_posix() == value
+    )
+
+
 def exact_object(value: object, fields: set[str], path: str) -> tuple[list[str], dict]:
     if not isinstance(value, dict):
         return [f"{path} must be an object"], {}
@@ -88,8 +98,10 @@ def path_list(
     errors: list[str] = []
     parsed: list[str] = []
     for index, item in enumerate(value):
-        if not safe_relative_path(item):
-            errors.append(f"{path}[{index}] must be a project-relative path")
+        if not canonical_relative_path(item):
+            errors.append(
+                f"{path}[{index}] must be an exact canonical project-relative path"
+            )
         else:
             parsed.append(item)
     if len(parsed) != len(set(parsed)):
@@ -353,8 +365,10 @@ def validate_candidate(candidate: dict) -> list[str]:
             errors.extend(set_errors)
             set_values.append(values)
         artifact_ref = item.get("artifact_ref")
-        if not safe_relative_path(artifact_ref):
-            errors.append(f"{path}.artifact_ref must be project-relative")
+        if not canonical_relative_path(artifact_ref):
+            errors.append(
+                f"{path}.artifact_ref must be an exact canonical project-relative path"
+            )
         elif artifact_ref in artifacts:
             errors.append(f"duplicate observation artifact_ref: {artifact_ref}")
         else:
@@ -421,11 +435,16 @@ def validate_candidate(candidate: dict) -> list[str]:
                 errors.append("repeat_apply must start from planned_output_sha256")
             if planned or attempted or committed or residual:
                 errors.append("repeat_apply must converge without writes")
+        elif kind == "check_clean":
+            if input_digest != planned_output or expected_input != planned_output:
+                errors.append(
+                    "check_clean must evaluate the converged planned_output_sha256"
+                )
         elif kind == "check_drift":
-            if input_digest == baseline or input_digest == planned_output:
-                errors.append("check_drift requires an independent drift fixture")
-            if expected_input != input_digest:
-                errors.append("check_drift expected input must match its fixture")
+            if input_digest != baseline or expected_input != baseline:
+                errors.append(
+                    "check_drift must evaluate candidate.run.subject_sha256 before apply"
+                )
             if planned or attempted or committed or residual:
                 errors.append("check_drift must be read-only")
         elif kind == "stale_plan":
@@ -453,15 +472,28 @@ def validate_candidate(candidate: dict) -> list[str]:
         for kind in ("apply", "stale_plan"):
             if kind in by_kind and by_kind[kind].get("plan_sha256") != plan_digest:
                 errors.append(f"{kind} does not bind the validated plan")
-    if all(kind in by_kind for kind in ("plan", "apply", "repeat_apply")):
-        if not (
-            by_kind["plan"]["sequence"]
-            < by_kind["apply"]["sequence"]
-            < by_kind["repeat_apply"]["sequence"]
-        ):
+    ordered_kinds = ("check_drift", "plan", "apply", "check_clean", "repeat_apply")
+    if all(kind in by_kind for kind in ordered_kinds):
+        ordered_sequences = [by_kind[kind].get("sequence") for kind in ordered_kinds]
+        if all(
+            isinstance(sequence, int) and not isinstance(sequence, bool)
+            for sequence in ordered_sequences
+        ) and ordered_sequences != sorted(ordered_sequences):
             errors.append(
-                "mutation sequence must be plan before apply before repeat_apply"
+                "mutation sequence must be check_drift before plan before apply "
+                "before check_clean before repeat_apply"
             )
+    if all(kind in by_kind for kind in ("plan", "stale_plan")):
+        plan_sequence = by_kind["plan"].get("sequence")
+        stale_sequence = by_kind["stale_plan"].get("sequence")
+        if (
+            isinstance(plan_sequence, int)
+            and not isinstance(plan_sequence, bool)
+            and isinstance(stale_sequence, int)
+            and not isinstance(stale_sequence, bool)
+            and plan_sequence >= stale_sequence
+        ):
+            errors.append("stale_plan must execute after the validated plan")
     return errors
 
 
@@ -469,7 +501,7 @@ def main() -> int:
     args = parse_args()
     try:
         candidate = load_json_yaml(Path(args.candidate))
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         print(
             json.dumps(
                 {"status": "CANDIDATE_ERROR", "errors": [str(exc)]}, sort_keys=True

@@ -351,14 +351,19 @@ The candidate requires exactly one observation of every kind. Help, invalid
 invocation, clean/drift check, and plan are read-only. Plan declares the exact
 write set. Apply binds the same plan and expected input, writes exactly the
 declared paths, preserves the protected digest, and reaches the declared output
-digest. Repeating apply against that output performs no attempted or committed
-writes. A stale-plan fixture starts from an independent conflicting digest and
+digest. Drift check evaluates the pre-apply subject; clean check evaluates the
+declared output; repeating apply against that output performs no attempted or
+committed writes. Their sequence is drift, plan, apply, clean, then repeat. A
+stale-plan fixture starts from an independent conflicting digest and
 must reject before writing. An injected failure must attempt a non-empty subset
 of the allowed paths, restore the original digest, commit nothing, and leave no
 residual path. Every observation binds one command and environment identity.
 An empty protected path set is allowed only as an explicit reviewed boundary;
 the rationale remains mandatory so greenfield/full-ownership tools do not force
 invented paths and brownfield tools cannot silently erase preservation scope.
+All write-set paths use canonical project-relative POSIX spelling; aliases such
+as `./path`, repeated separators, backslashes, glob expressions, and control
+characters are rejected. Artifact references follow the same exact-path rule.
 
 This is stricter than comparing final bytes twice: a tool that rewrites the
 same bytes, mutates timestamps, touches undeclared paths, accepts a stale plan,

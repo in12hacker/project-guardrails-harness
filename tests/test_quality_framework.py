@@ -3062,7 +3062,7 @@ class QualityFrameworkTest(unittest.TestCase):
         planned_output = "d" * 64
         protected = "e" * 64
         plan = "f" * 64
-        drift = "1" * 64
+        unrelated = "1" * 64
         conflict = "2" * 64
         mutable_paths = [
             ".guardrails/control-registry.yaml",
@@ -3073,8 +3073,8 @@ class QualityFrameworkTest(unittest.TestCase):
             ".guardrails/memory.md",
         ]
         kinds = [
-            "help", "invalid_invocation", "check_clean", "check_drift", "plan",
-            "apply", "repeat_apply", "stale_plan", "injected_failure",
+            "help", "invalid_invocation", "check_drift", "plan", "apply",
+            "check_clean", "repeat_apply", "stale_plan", "injected_failure",
         ]
         outcomes = {
             "help": "reported",
@@ -3119,8 +3119,8 @@ class QualityFrameworkTest(unittest.TestCase):
             attempted: list[str] = []
             committed: list[str] = []
             plan_digest = None
-            if kind == "check_drift":
-                input_digest = expected_input = output_digest = drift
+            if kind == "check_clean":
+                input_digest = expected_input = output_digest = planned_output
             elif kind == "plan":
                 planned = mutable_paths
                 plan_digest = plan
@@ -3192,6 +3192,21 @@ class QualityFrameworkTest(unittest.TestCase):
         def observation(value: dict, kind: str) -> dict:
             return next(item for item in value["observations"] if item["kind"] == kind)
 
+        def replace_mutable_paths(value: dict, paths: list[str]) -> None:
+            value["mutation_contract"]["mutable_paths"] = paths
+            for kind in ("plan", "apply", "stale_plan"):
+                observation(value, kind)["planned_write_set"] = paths
+            observation(value, "apply")["attempted_write_set"] = paths
+            observation(value, "apply")["committed_write_set"] = paths
+            observation(value, "injected_failure")["attempted_write_set"] = paths[:1]
+
+        def swap_sequences(value: dict, left: str, right: str) -> None:
+            left_observation = observation(value, left)
+            right_observation = observation(value, right)
+            left_observation["sequence"], right_observation["sequence"] = (
+                right_observation["sequence"], left_observation["sequence"]
+            )
+
         mutations = {
             "help_writes": lambda value: observation(value, "help").update(
                 committed_write_set=mutable_paths[:1],
@@ -3199,8 +3214,37 @@ class QualityFrameworkTest(unittest.TestCase):
             "check_drift_mutates": lambda value: observation(value, "check_drift").update(
                 output_tree_sha256=planned_output,
             ),
+            "clean_claims_pre_apply_subject": lambda value: observation(
+                value, "check_clean",
+            ).update(
+                input_tree_sha256=baseline,
+                expected_input_sha256=baseline,
+                output_tree_sha256=baseline,
+            ),
+            "drift_uses_unrelated_fixture": lambda value: observation(
+                value, "check_drift",
+            ).update(
+                input_tree_sha256=unrelated,
+                expected_input_sha256=unrelated,
+                output_tree_sha256=unrelated,
+            ),
+            "clean_before_apply": lambda value: swap_sequences(
+                value, "apply", "check_clean",
+            ),
             "invented_write": lambda value: observation(value, "apply").update(
                 committed_write_set=[".guardrails/unknown.json"],
+            ),
+            "noncanonical_write_path": lambda value: replace_mutable_paths(
+                value, [".guardrails//control-registry.yaml"],
+            ),
+            "backslash_write_path": lambda value: replace_mutable_paths(
+                value, [".guardrails\\control-registry.yaml"],
+            ),
+            "glob_write_path": lambda value: replace_mutable_paths(
+                value, [".guardrails/*.yaml"],
+            ),
+            "artifact_path_alias": lambda value: observation(value, "apply").update(
+                artifact_ref="evidence//mutator/apply.json",
             ),
             "non_idempotent_repeat": lambda value: observation(value, "repeat_apply").update(
                 attempted_write_set=mutable_paths,
@@ -3242,6 +3286,9 @@ class QualityFrameworkTest(unittest.TestCase):
             "write_set_object": lambda value: observation(value, "apply").update(
                 committed_write_set=[{}],
             ),
+            "sequence_object": lambda value: observation(value, "apply").update(
+                sequence={},
+            ),
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name):
@@ -3250,6 +3297,16 @@ class QualityFrameworkTest(unittest.TestCase):
                 rejected = validate(rejected_candidate)
                 self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
                 self.assertEqual("CANDIDATE_REJECTED", json.loads(rejected.stdout)["status"])
+
+        directory_input = fixture.parent / "candidate-directory"
+        directory_input.mkdir()
+        unreadable = subprocess.run(
+            [sys.executable, str(MUTATOR_CANDIDATE), str(directory_input)],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, unreadable.returncode, unreadable.stdout + unreadable.stderr)
+        self.assertNotIn("Traceback", unreadable.stderr)
+        self.assertEqual("CANDIDATE_ERROR", json.loads(unreadable.stdout)["status"])
 
     def test_seal_rejects_archive_id_path_escape(self) -> None:
         project = self.make_project()

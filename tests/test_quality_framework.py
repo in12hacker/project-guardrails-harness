@@ -27,6 +27,7 @@ READINESS = ROOT / "scripts" / "assess_readiness.py"
 HARNESS_CANDIDATE = ROOT / "scripts" / "validate_harness_candidate.py"
 MUTATOR_CANDIDATE = ROOT / "scripts" / "validate_mutator_candidate.py"
 HANDOFF = ROOT / "scripts" / "render_task_handoff.py"
+HANDOFF_STATE = ROOT / "scripts" / "handoff_state.py"
 QUERY_STATE = ROOT / "scripts" / "query_quality_state.py"
 SEAL = ROOT / "scripts" / "seal_evidence.py"
 PREFLIGHT = ROOT / "templates" / "preflight.py"
@@ -2474,7 +2475,7 @@ class QualityFrameworkTest(unittest.TestCase):
         })
 
     def test_handoff_requires_task_claim_readiness_and_accepts_typed_blocked(self) -> None:
-        module = self.load_script_module("render_task_handoff_fixture", HANDOFF)
+        module = self.load_script_module("handoff_state_fixture", HANDOFF_STATE)
         args = argparse.Namespace(
             guardrails_dir=".guardrails", campaign_id="CAMPAIGN-1",
             campaign_revision=7, phase_id="PHASE-1", task_id="TASK-1",
@@ -2959,6 +2960,118 @@ class QualityFrameworkTest(unittest.TestCase):
             check=False, capture_output=True, text=True,
         )
         self.assertEqual(2, queried.returncode)
+
+    def test_handoff_output_paths_cannot_alias_payload_or_lock(self) -> None:
+        project = self.make_project(development_mode="human_brownfield")
+        registry = json.loads(
+            (project / ".guardrails/control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        command = [
+            sys.executable, str(HANDOFF), "--root", str(project),
+            "--task-id", "TASK-PATH-ALIAS", "--control", control_id,
+        ]
+        alias = ".guardrails/evidence/aliased-handoff"
+        same_path = subprocess.run(
+            [
+                *command, "--output", alias, "--payload-output", alias, "--write",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, same_path.returncode)
+        self.assertEqual("HANDOFF_ERROR", json.loads(same_path.stdout)["status"])
+        self.assertFalse((project / alias).exists())
+
+        rendered = subprocess.run(
+            [*command, "--write"], check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stdout + rendered.stderr)
+        lock = project / ".guardrails/evidence/.task-handoff.lock"
+        self.assertTrue(lock.is_file())
+        lock_before = lock.read_bytes()
+        lock_alias = subprocess.run(
+            [
+                *command, "--output", ".guardrails/evidence/.task-handoff.lock",
+                "--write",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, lock_alias.returncode)
+        self.assertEqual("HANDOFF_ERROR", json.loads(lock_alias.stdout)["status"])
+        self.assertEqual(lock_before, lock.read_bytes())
+        payload = project / ".guardrails/evidence/task-handoff.json"
+        lock.unlink()
+        lock.symlink_to(payload.name)
+        redirected_lock = subprocess.run(
+            [*command, "--write"], check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, redirected_lock.returncode)
+        self.assertEqual("HANDOFF_ERROR", json.loads(redirected_lock.stdout)["status"])
+        self.assertTrue(lock.is_symlink())
+        self.assertTrue(payload.is_file())
+        lock.unlink()
+        os.link(payload, lock)
+        hardlinked_lock = subprocess.run(
+            [*command, "--write"], check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(2, hardlinked_lock.returncode)
+        self.assertEqual("HANDOFF_ERROR", json.loads(hardlinked_lock.stdout)["status"])
+        self.assertTrue(lock.samefile(payload))
+        lock.unlink()
+        checked = subprocess.run(
+            [*command, "--check"], check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+
+    def test_quality_query_bounds_every_response_path(self) -> None:
+        project = self.make_project(development_mode="human_brownfield")
+        registry = json.loads(
+            (project / ".guardrails/control-registry.yaml").read_text()
+        )
+        control_id = registry["controls"][0]["id"]
+        cases = [
+            ["--view", "control", *sum(
+                (["--id", f"UNKNOWN-{index:03d}"] for index in range(250)), []
+            )],
+            ["--view", "control", "--id", "X" * 257],
+            ["--view", "control", *sum(
+                (["--id", f"UNKNOWN-{index:03d}-" + "X" * 32] for index in range(100)), []
+            )],
+            ["--view", "control"],
+            ["--view", "unsupported-view"],
+            ["--view", "control", "--limit", "0"],
+        ]
+        for index, arguments in enumerate(cases):
+            with self.subTest(arguments=arguments[:4]):
+                result = subprocess.run(
+                    [
+                        sys.executable, str(QUERY_STATE), "--root", str(project),
+                        "--max-bytes", "256", *arguments,
+                    ],
+                    check=False, capture_output=True, text=True,
+                )
+                self.assertLessEqual(len(result.stdout.encode("utf-8")), 256)
+                response = json.loads(result.stdout)
+                self.assertIn(response["status"], {
+                    "QUERY_ERROR", "QUERY_RESULT_TOO_LARGE",
+                })
+                self.assertNotEqual(0, result.returncode)
+                if index < 4:
+                    self.assertEqual({"status": "QUERY_RESULT_TOO_LARGE"}, response)
+
+        selected = subprocess.run(
+            [
+                sys.executable, str(QUERY_STATE), "--root", str(project),
+                "--max-bytes", "4096", "--view", "control", "--id", control_id,
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(0, selected.returncode, selected.stdout + selected.stderr)
+        self.assertLessEqual(len(selected.stdout.encode("utf-8")), 4096)
+        self.assertNotIn(
+            "render_task_handoff",
+            QUERY_STATE.read_text(encoding="utf-8"),
+        )
 
     def test_evidence_uses_project_relative_paths(self) -> None:
         project = self.make_project()

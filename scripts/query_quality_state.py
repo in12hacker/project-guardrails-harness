@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
+import sys
 from pathlib import Path
 
 from handoff_common import (
@@ -17,6 +17,7 @@ from handoff_common import (
     parse_human_notes_binding,
     validate_handoff_payload,
 )
+from handoff_state import build_payload, machine_summary, manual_body
 from quality_common import (
     load_json_yaml,
     registry_control_ids,
@@ -32,7 +33,19 @@ DEFAULT_MAX_BYTES = 16_384
 HARD_MAX_BYTES = 65_536
 DEFAULT_LIMIT = 20
 HARD_LIMIT = 100
+MAX_SELECTORS = 100
+MAX_SELECTOR_BYTES = 256
 HANDOFF_DIGEST_PATTERN = re.compile(r"(?m)^- Payload SHA-256: `(?P<digest>[0-9a-f]{64})`$")
+OVERSIZED_RESPONSE = {"status": "QUERY_RESULT_TOO_LARGE"}
+
+
+class QueryArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise QueryArgumentError(message)
+
+
+class QueryArgumentError(ValueError):
+    pass
 
 
 class QuerySelectorError(ValueError):
@@ -50,7 +63,7 @@ class QueryResultTooLarge(ValueError):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = QueryArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".")
     parser.add_argument("--guardrails-dir", default=".guardrails")
     parser.add_argument("--handoff-output")
@@ -63,6 +76,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     return parser.parse_args()
+
+
+def requested_max_bytes(argv: list[str]) -> int:
+    requested = DEFAULT_MAX_BYTES
+    for index, value in enumerate(argv):
+        candidate_text: str | None = None
+        if value == "--max-bytes" and index + 1 < len(argv):
+            candidate_text = argv[index + 1]
+        elif value.startswith("--max-bytes="):
+            candidate_text = value.partition("=")[2]
+        if candidate_text is not None:
+            try:
+                candidate = int(candidate_text)
+            except ValueError:
+                continue
+            if 256 <= candidate <= HARD_MAX_BYTES:
+                requested = candidate
+    return requested
+
+
+def emit(payload: dict, max_bytes: int, exit_code: int) -> int:
+    output = canonical_json(payload) + "\n"
+    if len(output.encode("utf-8")) > max_bytes:
+        output = canonical_json(OVERSIZED_RESPONSE) + "\n"
+        exit_code = 1
+    print(output, end="")
+    return exit_code
 
 
 def selected(items: list[dict], identifiers: list[str], fields: tuple[str, ...], limit: int) -> list[dict]:
@@ -131,8 +171,6 @@ def validate_current_handoff(
     payload_path: Path, summary_path: Path,
 ) -> None:
     """Re-derive machine state; pair digests alone do not establish truth."""
-    from render_task_handoff import build_payload, machine_summary, manual_body
-
     context = handoff["task_context"]
     registered = context["kind"] == "registered_campaign_task"
     derivation_args = argparse.Namespace(
@@ -320,11 +358,22 @@ def build_result(
 
 
 def main() -> int:
-    args = parse_args()
+    response_limit = requested_max_bytes(sys.argv[1:])
+    try:
+        args = parse_args()
+    except QueryArgumentError as exc:
+        return emit({"status": "QUERY_ERROR", "errors": [str(exc)]}, response_limit, 2)
+    if len(args.id) > MAX_SELECTORS or any(
+        len(identifier.encode("utf-8")) > MAX_SELECTOR_BYTES
+        for identifier in args.id
+    ):
+        return emit(OVERSIZED_RESPONSE, response_limit, 1)
     args.id = list(dict.fromkeys(args.id))
     if not safe_relative_path(args.guardrails_dir):
-        print(json.dumps({"status": "QUERY_ERROR", "errors": ["guardrails directory must be project-relative"]}))
-        return 2
+        return emit({
+            "status": "QUERY_ERROR",
+            "errors": ["guardrails directory must be project-relative"],
+        }, response_limit, 2)
     guardrails_relative = Path(args.guardrails_dir)
     args.handoff_output = args.handoff_output or (
         guardrails_relative / "evidence" / "task-handoff.md"
@@ -336,11 +385,15 @@ def main() -> int:
         not safe_relative_path(path)
         for path in (args.handoff_output, args.handoff_payload)
     ):
-        print(json.dumps({"status": "QUERY_ERROR", "errors": ["paths must be project-relative"]}))
-        return 2
+        return emit({
+            "status": "QUERY_ERROR", "errors": ["paths must be project-relative"],
+        }, response_limit, 2)
     if not 1 <= args.limit <= HARD_LIMIT or not 256 <= args.max_bytes <= HARD_MAX_BYTES:
-        print(json.dumps({"status": "QUERY_ERROR", "errors": ["limit or max-bytes is outside the supported range"]}))
-        return 2
+        return emit({
+            "status": "QUERY_ERROR",
+            "errors": ["limit or max-bytes is outside the supported range"],
+        }, response_limit, 2)
+    response_limit = args.max_bytes
     try:
         root = Path(args.root).resolve()
         guardrails = root / args.guardrails_dir
@@ -354,37 +407,20 @@ def main() -> int:
             args, root, guardrails, payload_path, summary_path,
         )
     except QuerySelectorError as exc:
-        print(canonical_json({
+        return emit({
             "status": exc.status,
             "view": args.view,
             "identifiers": exc.identifiers,
             "errors": [str(exc)],
-        }))
-        return 1
-    except QueryResultTooLarge as exc:
-        print(canonical_json({
-            "status": "QUERY_RESULT_TOO_LARGE",
-            "view": args.view,
-            "limit": exc.limit,
-            "item_count": exc.item_count,
-            "hint": "increase --limit or request fewer identifiers",
-        }))
-        return 1
+        }, response_limit, 1)
+    except QueryResultTooLarge:
+        return emit(OVERSIZED_RESPONSE, response_limit, 1)
     except (OSError, ValueError, KeyError) as exc:
-        print(json.dumps({"status": "QUERY_ERROR", "errors": [str(exc)]}, sort_keys=True))
-        return 2
+        return emit({
+            "status": "QUERY_ERROR", "errors": [str(exc)],
+        }, response_limit, 2)
     envelope = {"status": "QUERY_OK", "view": args.view, "result": result}
-    output = canonical_json(envelope) + "\n"
-    if len(output.encode("utf-8")) > args.max_bytes:
-        print(canonical_json({
-            "status": "QUERY_RESULT_TOO_LARGE",
-            "view": args.view,
-            "max_bytes": args.max_bytes,
-            "hint": "use --id, reduce --limit, or request a narrower view",
-        }))
-        return 1
-    print(output, end="")
-    return 0
+    return emit(envelope, response_limit, 0)
 
 
 if __name__ == "__main__":

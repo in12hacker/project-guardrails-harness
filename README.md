@@ -43,7 +43,8 @@ Use it when asked to:
     ├── register_campaign.py # bind an AI brownfield campaign to current v3 evidence
     ├── sync_traceability.py # regenerate the derived traceability graph
     ├── evaluate_quality.py  # execute controls and enforce claims
-    ├── render_task_handoff.py # derive the current task handoff
+    ├── handoff_state.py       # derive handoff state without project writes
+    ├── render_task_handoff.py # persist the current task handoff
     └── query_quality_state.py # return bounded, verified state projections
 ```
 

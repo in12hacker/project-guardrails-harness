@@ -183,8 +183,10 @@ binding; drift emits `STALE_HUMAN_NOTES` until an operator explicitly reviews
 and rebinds the notes. This local acknowledgement records freshness only; it is
 not owner approval, audit authority, or claim evidence. The handoff does not
 claim task, merge, or release readiness; it only reports the current derived
-state. Each file is replaced atomically and recoverable write failures roll the
-pair back; readers reject a mismatched pair after an uncatchable interruption.
+state. The summary, payload, and reserved lock must resolve to distinct file
+identities under the evidence directory. Each data file is replaced atomically,
+and recoverable write failures roll the pair back; readers reject a mismatched
+pair after an uncatchable interruption.
 
 Use `query_quality_state.py` for bounded, selector-based reads. It parses the
 complete structured files locally, re-derives current handoff machine state,
@@ -193,7 +195,11 @@ fail explicitly rather than returning a misleading successful empty result.
 Results have item and byte limits; an oversized result fails with
 `QUERY_RESULT_TOO_LARGE` rather than emitting truncated or invalid JSON. A view
 without selectors may return its bounded prefix; an explicit selector request
-is all-or-error and is never silently truncated. Evidence selected by control
-ID is explicitly labeled as a projection: it preserves the source entry and
-previous-entry digests as provenance fields but is not itself a hash-chain
-entry. Selecting an exact run ID returns the complete original run.
+is all-or-error and is never silently truncated. A request accepts at most 100
+raw selectors of at most 256 UTF-8 bytes each. Successes, selector failures,
+validation failures, and argument failures use the same byte-bounded emitter;
+an oversized response is the fixed minimal `QUERY_RESULT_TOO_LARGE` envelope.
+Evidence selected by control ID is explicitly labeled as a projection: it
+preserves the source entry and previous-entry digests as provenance fields but
+is not itself a hash-chain entry. Selecting an exact run ID returns the complete
+original run.
